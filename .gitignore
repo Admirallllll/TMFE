@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.DS_Store
+.ipynb_checkpoints/
+.pytest_cache/
+.venv/
+data/hf_cache/
+
+# Generated data / artifacts (do not commit)
+data/processed/
+data/external/
+outputs/
