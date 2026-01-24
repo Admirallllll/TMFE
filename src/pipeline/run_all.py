@@ -12,6 +12,7 @@ from src.data.build_panel import build_panel_with_targets
 from src.data.load_hf import load_hf_dataset_to_df
 from src.data.preprocess import preprocess_base_table
 from src.features.ani import compute_ani_features
+from src.features.document_embeddings import compute_document_embeddings
 from src.features.embeddings_similarity import compute_embedding_similarity_features
 from src.features.sentiment_lm import compute_lm_features
 from src.features.tfidf_features import fit_tfidf, top_ngrams
@@ -36,6 +37,7 @@ def _artifact_paths(base_dir: Path, *, dev_mode: bool) -> dict[str, Path]:
         "ani": base_dir / "features_ani.parquet",
         "lm": base_dir / "features_lm.parquet",
         "topics": base_dir / "features_topics.parquet",
+        "doc_emb": base_dir / "document_embeddings.npy",
         "emb": base_dir / "features_embeddings.parquet",
         "model_df": base_dir / "modeling_dataset.parquet",
     }
@@ -45,6 +47,15 @@ def _maybe_load(path: Path, *, recompute: bool) -> pd.DataFrame | None:
     if (not recompute) and path.exists():
         return read_parquet(path)
     return None
+
+
+def _maybe_load_embeddings(path: Path, *, recompute: bool, expected_rows: int) -> np.ndarray | None:
+    if recompute or (not path.exists()):
+        return None
+    arr = np.load(path)
+    if arr.ndim != 2 or arr.shape[0] != expected_rows:
+        return None
+    return arr
 
 
 def _compute_pre_post(df: pd.DataFrame, *, split_datacqtr: str) -> pd.DataFrame:
@@ -172,6 +183,31 @@ def run_all(run_cfg: RunConfig, *, dataset_cfg: DatasetConfig, feature_cfg: Feat
         write_parquet(lm, artifacts["lm"])
 
     topics = _maybe_load(artifacts["topics"], recompute=run_cfg.recompute)
+    emb = _maybe_load(artifacts["emb"], recompute=run_cfg.recompute)
+
+    doc_emb: np.ndarray | None = None
+    if (topics is None) or (emb is None):
+        doc_emb = _maybe_load_embeddings(artifacts["doc_emb"], recompute=run_cfg.recompute, expected_rows=len(panel))
+        if doc_emb is None:
+            try:
+                doc_emb_res = compute_document_embeddings(
+                    panel,
+                    text_col="clean_transcript",
+                    model_name=feature_cfg.embeddings_model,
+                    max_chars_per_chunk=feature_cfg.embeddings_max_chars_per_chunk,
+                    max_chunks_per_doc=feature_cfg.embeddings_max_chunks_per_doc,
+                    batch_size=feature_cfg.embeddings_batch_size,
+                    device=feature_cfg.embeddings_device,
+                    logger=logger,
+                )
+                doc_emb = doc_emb_res.embeddings
+                artifacts["doc_emb"].parent.mkdir(parents=True, exist_ok=True)
+                np.save(artifacts["doc_emb"], doc_emb.astype("float32", copy=False))
+                logger.info(f"Saved document embeddings: {artifacts['doc_emb']}")
+            except Exception as e:
+                logger.info(f"Document embeddings failed ({e}); continuing without cached embeddings")
+                doc_emb = None
+
     if topics is None:
         panel_for_topics = panel
         if "ani_kw_per1k" not in panel.columns and {"ani_any", "ani_kw_per1k"}.issubset(set(ani.columns)):
@@ -184,6 +220,8 @@ def run_all(run_cfg: RunConfig, *, dataset_cfg: DatasetConfig, feature_cfg: Feat
             text_col="clean_transcript",
             model_dir=model_dir,
             method=feature_cfg.topic_model,
+            doc_embeddings=doc_emb,
+            bertopic_calculate_probabilities=feature_cfg.bertopic_calculate_probabilities,
             lda_num_topics=feature_cfg.lda_num_topics,
             lda_passes=feature_cfg.lda_passes,
             lda_chunksize=feature_cfg.lda_chunksize,
@@ -193,7 +231,6 @@ def run_all(run_cfg: RunConfig, *, dataset_cfg: DatasetConfig, feature_cfg: Feat
         write_parquet(topics, artifacts["topics"])
         logger.info(f"Topics method used: {topic_res.method}, ai_topics={len(topic_res.ai_topic_ids)}")
 
-    emb = _maybe_load(artifacts["emb"], recompute=run_cfg.recompute)
     if emb is None:
         emb_res = compute_embedding_similarity_features(
             panel,
@@ -201,8 +238,12 @@ def run_all(run_cfg: RunConfig, *, dataset_cfg: DatasetConfig, feature_cfg: Feat
             seed_statements=AI_SEED_STATEMENTS,
             model_name=feature_cfg.embeddings_model,
             max_chars_per_chunk=feature_cfg.embeddings_max_chars_per_chunk,
+            max_chunks_per_doc=feature_cfg.embeddings_max_chunks_per_doc,
+            batch_size=feature_cfg.embeddings_batch_size,
+            device=feature_cfg.embeddings_device,
             model_dir=model_dir,
             logger=logger,
+            doc_embeddings=doc_emb,
         )
         emb = emb_res.features
         write_parquet(emb, artifacts["emb"])
@@ -333,10 +374,40 @@ def main() -> None:
     parser.add_argument("--dev", action="store_true", help="Run in DEV_MODE with a smaller sample and dev outputs.")
     parser.add_argument("--dev-sample-n", type=int, default=RunConfig().dev_sample_n, help="Number of documents to sample in DEV_MODE.")
     parser.add_argument("--recompute", action="store_true", help="Ignore caches and recompute all artifacts.")
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=FeatureConfig().embeddings_device,
+        help="Embedding device for sentence-transformers (cuda/cpu/auto). Default: cuda.",
+    )
+    parser.add_argument(
+        "--emb-batch-size",
+        type=int,
+        default=FeatureConfig().embeddings_batch_size,
+        help="Batch size for sentence-transformers encoding. Increase on GPUs if you have VRAM.",
+    )
+    parser.add_argument(
+        "--emb-max-chunks",
+        type=int,
+        default=int(FeatureConfig().embeddings_max_chunks_per_doc or 0),
+        help="Max chunks per transcript for embeddings (0 = no cap). Lower is faster.",
+    )
+    parser.add_argument(
+        "--no-topic-probs",
+        action="store_true",
+        help="Disable BERTopic probability calculation (faster; ai_topic_share becomes a 0/1 indicator).",
+    )
     args = parser.parse_args()
 
     run_cfg = RunConfig(dev_mode=bool(args.dev), dev_sample_n=int(args.dev_sample_n), recompute=bool(args.recompute))
-    run_all(run_cfg, dataset_cfg=DatasetConfig(), feature_cfg=FeatureConfig())
+    emb_max_chunks = int(args.emb_max_chunks)
+    feature_cfg = FeatureConfig(
+        embeddings_device=str(args.device),
+        embeddings_batch_size=int(args.emb_batch_size),
+        embeddings_max_chunks_per_doc=(None if emb_max_chunks <= 0 else emb_max_chunks),
+        bertopic_calculate_probabilities=(not bool(args.no_topic_probs)),
+    )
+    run_all(run_cfg, dataset_cfg=DatasetConfig(), feature_cfg=feature_cfg)
 
 
 if __name__ == "__main__":

@@ -84,6 +84,8 @@ def main() -> None:
         panel,
         model_dir=paths.models_dir / "smoke",
         method="auto",
+        doc_embeddings=None,
+        bertopic_calculate_probabilities=FeatureConfig().bertopic_calculate_probabilities,
         lda_num_topics=10,
         lda_passes=2,
         lda_chunksize=500,
@@ -95,8 +97,12 @@ def main() -> None:
         seed_statements=AI_SEED_STATEMENTS,
         model_name=FeatureConfig().embeddings_model,
         max_chars_per_chunk=FeatureConfig().embeddings_max_chars_per_chunk,
+        max_chunks_per_doc=FeatureConfig().embeddings_max_chunks_per_doc,
+        batch_size=FeatureConfig().embeddings_batch_size,
+        device=FeatureConfig().embeddings_device,
         model_dir=paths.models_dir / "smoke",
         logger=logger,
+        doc_embeddings=None,
     ).features
 
     df = pd.concat([panel.reset_index(drop=True), ani, lm, topics, emb], axis=1)

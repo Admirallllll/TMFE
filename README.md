@@ -22,6 +22,21 @@ Run the full pipeline:
 python -m src.pipeline.run_all
 ```
 
+GPU acceleration (recommended on Windows + NVIDIA CUDA):
+
+- Install a CUDA-enabled PyTorch build (follow the official PyTorch installer for your CUDA version).
+- Run with CUDA (default):
+
+```bash
+python -m src.pipeline.run_all --device cuda
+```
+
+If you do not have CUDA available, use CPU:
+
+```bash
+python -m src.pipeline.run_all --device cpu
+```
+
 Run a fast DEV sample (for iteration):
 
 ```bash
@@ -91,6 +106,12 @@ Running `python -m src.pipeline.run_all` produces:
 **Caching**
 - Hugging Face caching uses `data/hf_cache/`.
 - Most intermediate outputs are cached as parquet under `data/processed/` and recomputed only with `--recompute`.
+- Document embeddings are computed once and cached under `data/processed/**/document_embeddings.npy`, then reused for both BERTopic and semantic similarity.
+
+**Performance knobs**
+- `--emb-batch-size`: increase on GPUs if you have VRAM (e.g., 64 → 128).
+- `--emb-max-chunks`: cap transcript chunks for faster embeddings (0 = no cap; lower is faster).
+- `--no-topic-probs`: faster BERTopic (but `ai_topic_share` becomes a 0/1 indicator).
 
 ## Troubleshooting
 

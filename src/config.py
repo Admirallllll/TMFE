@@ -58,6 +58,11 @@ class FeatureConfig:
 
     embeddings_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     embeddings_max_chars_per_chunk: int = 4000
+    embeddings_max_chunks_per_doc: int | None = 12
+    embeddings_batch_size: int = 64
+    embeddings_device: str = "cuda"
+
+    bertopic_calculate_probabilities: bool = True
 
 
 AI_SEED_STATEMENTS: tuple[str, ...] = (

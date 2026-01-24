@@ -6,6 +6,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from src.features.document_embeddings import compute_document_embeddings, resolve_device
+
 
 @dataclass(frozen=True)
 class EmbeddingSimilarityResult:
@@ -50,26 +52,44 @@ def compute_embedding_similarity_features(
     seed_statements: tuple[str, ...],
     model_name: str,
     max_chars_per_chunk: int,
+    max_chunks_per_doc: int | None = None,
+    batch_size: int = 64,
+    device: str = "cuda",
     model_dir: Path,
     logger,
+    doc_embeddings: np.ndarray | None = None,
 ) -> EmbeddingSimilarityResult:
-    texts = df[text_col].fillna("").tolist()
-
     try:
         from joblib import dump
         from sentence_transformers import SentenceTransformer
 
-        model = SentenceTransformer(model_name)
-        seed_emb = model.encode(list(seed_statements), batch_size=32, show_progress_bar=False, normalize_embeddings=True)
+        if doc_embeddings is not None:
+            doc_emb = np.asarray(doc_embeddings)
+            if doc_emb.ndim != 2 or doc_emb.shape[0] != len(df):
+                raise ValueError("doc_embeddings shape mismatch")
+        else:
+            doc_emb = compute_document_embeddings(
+                df,
+                text_col=text_col,
+                model_name=model_name,
+                max_chars_per_chunk=max_chars_per_chunk,
+                max_chunks_per_doc=max_chunks_per_doc,
+                batch_size=batch_size,
+                device=device,
+                logger=logger,
+            ).embeddings
 
-        doc_embs = []
-        for t in texts:
-            chunks = _chunk_text(t, max_chars=max_chars_per_chunk)
-            emb = model.encode(chunks, batch_size=16, show_progress_bar=False, normalize_embeddings=True)
-            doc_embs.append(np.mean(emb, axis=0))
-        doc_emb = np.vstack(doc_embs)
+        resolved_device = resolve_device(device, logger=logger)
+        model = SentenceTransformer(model_name, device=resolved_device)
+        seed_emb = model.encode(
+            list(seed_statements),
+            batch_size=min(int(batch_size), 64),
+            show_progress_bar=False,
+            convert_to_numpy=True,
+            normalize_embeddings=True,
+        ).astype("float32", copy=False)
 
-        sims = _cosine_sim(doc_emb, seed_emb)
+        sims = _cosine_sim(doc_emb.astype("float32", copy=False), seed_emb)
         out = pd.DataFrame(
             {
                 "ai_sim_mean": pd.Series(sims.mean(axis=1), dtype="float64"),
@@ -78,7 +98,7 @@ def compute_embedding_similarity_features(
         )
 
         model_dir.mkdir(parents=True, exist_ok=True)
-        dump({"model_name": model_name, "seed_statements": seed_statements}, model_dir / "embeddings_meta.joblib")
+        dump({"model_name": model_name, "seed_statements": seed_statements, "device": resolved_device}, model_dir / "embeddings_meta.joblib")
         np.save(model_dir / "seed_embeddings.npy", seed_emb)
 
         logger.info("Embedding similarity computed with sentence-transformers")
@@ -89,6 +109,7 @@ def compute_embedding_similarity_features(
     from joblib import dump
     from sklearn.feature_extraction.text import TfidfVectorizer
 
+    texts = df[text_col].fillna("").astype(str).tolist()
     all_texts = list(seed_statements) + texts
     vec = TfidfVectorizer(stop_words="english", min_df=2, max_df=0.95, ngram_range=(1, 2))
     X = vec.fit_transform(all_texts)
@@ -107,4 +128,3 @@ def compute_embedding_similarity_features(
     dump(vec, model_dir / "tfidf_seed_vectorizer.joblib")
     logger.info("Embedding similarity computed with TF-IDF fallback")
     return EmbeddingSimilarityResult(features=out, method="tfidf-fallback")
-

@@ -155,13 +155,16 @@ def _ai_topics_from_keywords(topic_keywords: dict[int, list[str]]) -> set[int]:
 def _fit_transform_bertopic(
     docs: list[str],
     *,
+    embeddings: np.ndarray | None,
+    calculate_probabilities: bool,
     model_dir: Path,
     logger,
 ) -> tuple[list[int], np.ndarray | None, dict[int, list[str]]]:
     from bertopic import BERTopic
     from bertopic.vectorizers import ClassTfidfTransformer
-    from joblib import dump
+    from hdbscan import HDBSCAN
     from sklearn.feature_extraction.text import CountVectorizer
+    from umap import UMAP
 
     vectorizer_model = CountVectorizer(
         stop_words="english",
@@ -170,16 +173,39 @@ def _fit_transform_bertopic(
         ngram_range=(1, 2),
     )
     ctfidf_model = ClassTfidfTransformer(reduce_frequent_words=True)
+
+    umap_model = UMAP(
+        n_neighbors=15,
+        n_components=5,
+        min_dist=0.0,
+        metric="cosine",
+        random_state=0,
+    )
+    hdbscan_model = HDBSCAN(
+        min_cluster_size=15,
+        metric="euclidean",
+        cluster_selection_method="eom",
+        prediction_data=bool(calculate_probabilities),
+        core_dist_n_jobs=-1,
+    )
     topic_model = BERTopic(
         language="english",
-        calculate_probabilities=True,
+        calculate_probabilities=bool(calculate_probabilities),
         verbose=False,
         vectorizer_model=vectorizer_model,
         ctfidf_model=ctfidf_model,
         top_n_words=15,
         min_topic_size=15,
+        umap_model=umap_model,
+        hdbscan_model=hdbscan_model,
     )
-    topics, probs = topic_model.fit_transform(docs)
+    if embeddings is not None:
+        emb = np.asarray(embeddings)
+        if emb.ndim != 2 or emb.shape[0] != len(docs):
+            raise ValueError("doc_embeddings shape mismatch for BERTopic")
+        topics, probs = topic_model.fit_transform(docs, embeddings=emb)
+    else:
+        topics, probs = topic_model.fit_transform(docs)
 
     topic_keywords: dict[int, list[str]] = {}
     for tid in topic_model.get_topics().keys():
@@ -189,7 +215,12 @@ def _fit_transform_bertopic(
         topic_keywords[int(tid)] = [w for w, _ in kws[:20]]
 
     model_dir.mkdir(parents=True, exist_ok=True)
-    dump(topic_model, model_dir / "bertopic_model.joblib")
+    topic_model.save(
+        str(model_dir / "bertopic_model"),
+        serialization="pickle",
+        save_embedding_model=False,
+        save_ctfidf=False,
+    )
     pd.DataFrame(
         [{"topic_id": k, "keywords": ", ".join(v)} for k, v in sorted(topic_keywords.items())]
     ).to_csv(model_dir / "bertopic_topics.csv", index=False)
@@ -277,6 +308,8 @@ def compute_topic_features(
     text_col: str = "clean_transcript",
     model_dir: Path,
     method: str,
+    doc_embeddings: np.ndarray | None = None,
+    bertopic_calculate_probabilities: bool = True,
     lda_num_topics: int,
     lda_passes: int,
     lda_chunksize: int,
@@ -295,7 +328,13 @@ def compute_topic_features(
 
     if use_method == "bertopic":
         try:
-            topics, probs, topic_keywords = _fit_transform_bertopic(docs, model_dir=model_dir, logger=logger)
+            topics, probs, topic_keywords = _fit_transform_bertopic(
+                docs,
+                embeddings=doc_embeddings,
+                calculate_probabilities=bertopic_calculate_probabilities,
+                model_dir=model_dir,
+                logger=logger,
+            )
             ai_topics = _ai_topics_from_keywords(topic_keywords)
             if not ai_topics:
                 if "ani_kw_per1k" in df.columns:
