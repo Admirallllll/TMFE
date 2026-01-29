@@ -83,7 +83,7 @@ def _select_ai_topics_by_enrichment(
     return chosen
 
 
-def _ai_topics_from_keywords(topic_keywords: dict[int, list[str]]) -> set[int]:
+def _ai_topics_from_keywords(topic_keywords: dict[int, list[str]], *, logger=None) -> set[int]:
     ai_phrases = {
         "artificial intelligence",
         "machine learning",
@@ -149,6 +149,15 @@ def _ai_topics_from_keywords(topic_keywords: dict[int, list[str]]) -> set[int]:
             continue
         if sum(1 for w in kw_set if w in ai_kw_loose) >= 2:
             ai_topics.add(tid)
+
+    # Log results for debugging
+    if logger is not None:
+        logger.info(f"AI topics from keywords: {sorted(ai_topics) if ai_topics else 'NONE'}")
+        if not ai_topics:
+            # Log sample topic keywords for debugging
+            sample = {k: v[:5] for k, v in list(topic_keywords.items())[:5]}
+            logger.warning(f"No AI topics found via keyword matching. Sample topic keywords: {sample}")
+
     return ai_topics
 
 
@@ -335,7 +344,7 @@ def compute_topic_features(
                 model_dir=model_dir,
                 logger=logger,
             )
-            ai_topics = _ai_topics_from_keywords(topic_keywords)
+            ai_topics = _ai_topics_from_keywords(topic_keywords, logger=logger)
             if not ai_topics:
                 if "ani_kw_per1k" in df.columns:
                     ai_score = pd.to_numeric(df["ani_kw_per1k"], errors="coerce").fillna(0.0).to_numpy(dtype="float64")
@@ -343,10 +352,39 @@ def compute_topic_features(
                     ai_score = pd.to_numeric(df["ani_any"], errors="coerce").fillna(0.0).to_numpy(dtype="float64")
                 else:
                     ai_score = _doc_ai_score_from_text(docs)
-                ai_topics = _select_ai_topics_by_enrichment(topics, ai_score, logger=logger)
+                # Relaxed thresholds for better detection
+                ai_topics = _select_ai_topics_by_enrichment(
+                    topics, ai_score, min_ratio=1.2, top_k=5, min_topic_docs=5, logger=logger
+                )
+
+            # Document-level fallback if no AI topics identified
+            if not ai_topics:
+                logger.warning(
+                    "No AI topics identified by keywords or enrichment. "
+                    "Using document-level AI score as ai_topic_share fallback."
+                )
+                doc_ai_score = _doc_ai_score_from_text(docs)
+                max_score = float(np.nanmax(doc_ai_score)) if len(doc_ai_score) else 1.0
+                if max_score > 0:
+                    ai_topic_share = doc_ai_score / max_score  # Normalize to [0, 1]
+                else:
+                    ai_topic_share = doc_ai_score
+                features = pd.DataFrame({
+                    "topic_id": pd.Series(topics, dtype="int32"),
+                    "ai_topic_share": pd.Series(ai_topic_share, dtype="float64"),
+                })
+                # Log validation stats
+                nonzero_rate = float((features["ai_topic_share"] > 0).mean())
+                logger.info(
+                    f"ai_topic_share stats: mean={features['ai_topic_share'].mean():.4f}, "
+                    f"nonzero_rate={nonzero_rate:.2%}, method=bertopic-docfallback"
+                )
+                return TopicResult(features=features, ai_topic_ids=set(), method="bertopic-docfallback")
+
             features = pd.DataFrame({"topic_id": pd.Series(topics, dtype="int32")})
 
             if probs is None:
+                logger.info("BERTopic probabilities unavailable; using binary ai_topic_share indicator")
                 features["ai_topic_share"] = features["topic_id"].isin(ai_topics).astype(float)
             else:
                 probs = np.asarray(probs)
@@ -355,9 +393,23 @@ def compute_topic_features(
                     idx = [i for i, tid in enumerate(topic_ids) if tid in ai_topics]
                     features["ai_topic_share"] = probs[:, idx].sum(axis=1) if idx else 0.0
                 else:
+                    logger.warning(f"Probability matrix shape mismatch; using binary indicator")
                     features["ai_topic_share"] = features["topic_id"].isin(ai_topics).astype(float)
 
             features["ai_topic_share"] = features["ai_topic_share"].astype(float).where(features["ai_topic_share"] >= 1e-6, 0.0)
+
+            # Log validation stats
+            nonzero_rate = float((features["ai_topic_share"] > 0).mean())
+            logger.info(
+                f"ai_topic_share stats: mean={features['ai_topic_share'].mean():.4f}, "
+                f"nonzero_rate={nonzero_rate:.2%}, method=bertopic"
+            )
+            if nonzero_rate < 0.001:
+                logger.error(
+                    f"CRITICAL: ai_topic_share is nearly all zeros ({nonzero_rate:.4%} nonzero). "
+                    "Topic modeling likely failed to identify AI content."
+                )
+
             return TopicResult(features=features, ai_topic_ids=ai_topics, method="bertopic")
         except Exception as e:
             logger.info(f"BERTopic failed ({e}); falling back to LDA")
@@ -373,7 +425,7 @@ def compute_topic_features(
                 model_dir=model_dir,
                 logger=logger,
             )
-            ai_topics = _ai_topics_from_keywords(topic_keywords)
+            ai_topics = _ai_topics_from_keywords(topic_keywords, logger=logger)
             if not ai_topics:
                 if "ani_kw_per1k" in df.columns:
                     ai_score = pd.to_numeric(df["ani_kw_per1k"], errors="coerce").fillna(0.0).to_numpy(dtype="float64")
@@ -381,7 +433,35 @@ def compute_topic_features(
                     ai_score = pd.to_numeric(df["ani_any"], errors="coerce").fillna(0.0).to_numpy(dtype="float64")
                 else:
                     ai_score = _doc_ai_score_from_text(docs)
-                ai_topics = _select_ai_topics_by_enrichment(assigned, ai_score, logger=logger)
+                # Relaxed thresholds for better detection
+                ai_topics = _select_ai_topics_by_enrichment(
+                    assigned, ai_score, min_ratio=1.2, top_k=5, min_topic_docs=5, logger=logger
+                )
+
+            # Document-level fallback if no AI topics identified
+            if not ai_topics:
+                logger.warning(
+                    "No AI topics identified by keywords or enrichment. "
+                    "Using document-level AI score as ai_topic_share fallback."
+                )
+                doc_ai_score = _doc_ai_score_from_text(docs)
+                max_score = float(np.nanmax(doc_ai_score)) if len(doc_ai_score) else 1.0
+                if max_score > 0:
+                    ai_topic_share = doc_ai_score / max_score  # Normalize to [0, 1]
+                else:
+                    ai_topic_share = doc_ai_score
+                features = pd.DataFrame({
+                    "topic_id": pd.Series(assigned, dtype="int32"),
+                    "ai_topic_share": pd.Series(ai_topic_share, dtype="float64"),
+                })
+                # Log validation stats
+                nonzero_rate = float((features["ai_topic_share"] > 0).mean())
+                logger.info(
+                    f"ai_topic_share stats: mean={features['ai_topic_share'].mean():.4f}, "
+                    f"nonzero_rate={nonzero_rate:.2%}, method=lda-docfallback"
+                )
+                return TopicResult(features=features, ai_topic_ids=set(), method="lda-docfallback")
+
             ai_share = []
             for dt in doc_topics:
                 s = 0.0
@@ -396,6 +476,19 @@ def compute_topic_features(
                     "ai_topic_share": pd.Series(ai_share, dtype="float64"),
                 }
             )
+
+            # Log validation stats
+            nonzero_rate = float((features["ai_topic_share"] > 0).mean())
+            logger.info(
+                f"ai_topic_share stats: mean={features['ai_topic_share'].mean():.4f}, "
+                f"nonzero_rate={nonzero_rate:.2%}, method=lda"
+            )
+            if nonzero_rate < 0.001:
+                logger.error(
+                    f"CRITICAL: ai_topic_share is nearly all zeros ({nonzero_rate:.4%} nonzero). "
+                    "Topic modeling likely failed to identify AI content."
+                )
+
             return TopicResult(features=features, ai_topic_ids=ai_topics, method="lda")
         except Exception as e:
             logger.info(f"LDA failed ({e}); emitting zero topic features")

@@ -53,6 +53,7 @@ def load_hf_dataset_to_df(
     dev_sample_n: int,
     seed: int,
     logger,
+    start_year: int | None = None,
 ) -> pd.DataFrame:
     import os
 
@@ -136,6 +137,13 @@ def load_hf_dataset_to_df(
     missing_cols = [c for c in REQUIRED_COLUMNS if c not in df.columns]
     if missing_cols:
         raise ValueError(f"Dataset missing required columns: {missing_cols}")
+
+    # Filter by start_year if specified
+    if start_year is not None:
+        before_filter = len(df)
+        df["_year"] = pd.to_datetime(df["earnings_date"], errors="coerce").dt.year
+        df = df.loc[df["_year"] >= start_year].drop(columns=["_year"]).reset_index(drop=True)
+        logger.info(f"Filtered to start_year >= {start_year}: {before_filter:,} -> {len(df):,} rows")
 
     if dev_mode and len(df) > dev_sample_n:
         df = _sample_dev(df, dev_sample_n, seed)

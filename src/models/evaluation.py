@@ -15,6 +15,8 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 
+from tqdm import tqdm
+
 from src.models.baselines import classification_majority, regression_no_change
 from src.models.train_classification import build_classification_models
 from src.models.train_regression import build_regression_models
@@ -160,7 +162,7 @@ def run_model_benchmarks(
     )[1:]
 
     reg_models = bm2_reg_models + m_reg_models
-    for spec in reg_models:
+    for spec in tqdm(reg_models, desc="Training regression models", leave=False):
         logger.info(f"Fitting {spec.key} (regression)")
         spec.pipeline.fit(split.train, y_train_reg_fit)
         y_pred = spec.pipeline.predict(split.test)
@@ -180,12 +182,13 @@ def run_model_benchmarks(
     )[1:]
 
     cls_models = bm2_cls_models + m_cls_models
-    for spec in cls_models:
+    for spec in tqdm(cls_models, desc="Training classification models", leave=False):
         logger.info(f"Fitting {spec.key} (classification)")
         spec.pipeline.fit(split.train, y_train_cls)
         if hasattr(spec.pipeline, "predict_proba"):
             proba = spec.pipeline.predict_proba(split.test)[:, 1]
         else:
+            logger.warning(f"Model {spec.key} does not have predict_proba; using predict instead")
             proba = spec.pipeline.predict(split.test)
         dump(spec.pipeline, model_dir / f"{spec.key}__classification.joblib")
         rows.append({"task": "classification", "model": spec.key, **classification_metrics(y_test_cls, proba)})
@@ -219,8 +222,9 @@ def run_rolling_benchmarks(
     ]
 
     rows: list[dict[str, object]] = []
+    logger.info(f"Running rolling evaluation with {len(folds)} folds")
 
-    for i, (train_idx, test_idx, train_q, test_q) in enumerate(folds, start=1):
+    for i, (train_idx, test_idx, train_q, test_q) in enumerate(tqdm(folds, desc="Rolling CV folds"), start=1):
         train = df.loc[train_idx]
         test = df.loc[test_idx]
         y_train_reg = train[target_reg].astype(float).to_numpy()

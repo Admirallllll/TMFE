@@ -55,9 +55,10 @@ def build_regression_models(
                     l1_ratio=[0.1, 0.5, 0.9],
                     alphas=[1e-3, 1e-2, 1e-1, 1.0, 10.0, 100.0],
                     cv=TimeSeriesSplit(n_splits=3),
-                    max_iter=20000,
+                    max_iter=50000,  # Increased from 20000 to avoid ConvergenceWarning
+                    tol=1e-3,  # Relaxed from default 1e-4
                     random_state=seed,
-                    n_jobs=None,
+                    n_jobs=-1,  # Enable parallelization
                 ),
             ),
         ]

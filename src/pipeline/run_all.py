@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src.config import AI_SEED_STATEMENTS, DatasetConfig, FeatureConfig, Paths, RunConfig
+from src.config import AI_SEED_STATEMENTS, DatasetConfig, FeatureColumns, FeatureConfig, Paths, RunConfig
 from src.data.build_panel import build_panel_with_targets
 from src.data.load_hf import load_hf_dataset_to_df
 from src.data.preprocess import preprocess_base_table
@@ -22,6 +22,7 @@ from src.utils.io import read_parquet, write_csv, write_parquet
 from src.utils.logging import setup_logging
 from src.utils.time import datacqtr_to_index
 from src.viz.eda_plots import generate_eda_figures
+from src.viz.results_from_tables import generate_results_figures
 from src.viz.results_plots import plot_model_results, plot_pre_post_sector, plot_sector_heterogeneity
 
 
@@ -76,6 +77,55 @@ def _compute_pre_post(df: pd.DataFrame, *, split_datacqtr: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _evaluate_single_sector(
+    sector: str,
+    df: pd.DataFrame,
+    train_end_idx: int,
+    test_start_idx: int,
+    reg_bm2_template,
+    reg_m1_template,
+    cls_bm2_template,
+    cls_m1_template,
+) -> list[dict[str, object]]:
+    """Evaluate models for a single sector. Used for parallel processing."""
+    from sklearn.base import clone
+    from sklearn.metrics import roc_auc_score
+
+    from src.models.evaluation import regression_metrics
+
+    sub = df.loc[df["sector"] == sector].copy()
+    train = sub.loc[sub["quarter_index"].astype(int) <= train_end_idx]
+    test = sub.loc[sub["quarter_index"].astype(int) >= test_start_idx]
+
+    if len(train) < 300 or len(test) < 80:
+        return []
+
+    # Clone model templates instead of rebuilding
+    reg_bm2 = clone(reg_bm2_template)
+    reg_m1 = clone(reg_m1_template)
+    cls_bm2 = clone(cls_bm2_template)
+    cls_m1 = clone(cls_m1_template)
+
+    y_train_reg = train["delta_peforw_qavg"].astype(float).to_numpy()
+    y_test_reg = test["delta_peforw_qavg"].astype(float).to_numpy()
+    reg_bm2.fit(train, y_train_reg)
+    reg_m1.fit(train, y_train_reg)
+    bm2_rmse = regression_metrics(y_test_reg, reg_bm2.predict(test))["rmse"]
+    m1_rmse = regression_metrics(y_test_reg, reg_m1.predict(test))["rmse"]
+
+    y_train_cls = train["valuation_upgrade"].astype(int).to_numpy()
+    y_test_cls = test["valuation_upgrade"].astype(int).to_numpy()
+    cls_bm2.fit(train, y_train_cls)
+    cls_m1.fit(train, y_train_cls)
+    bm2_auc = float(roc_auc_score(y_test_cls, cls_bm2.predict_proba(test)[:, 1]))
+    m1_auc = float(roc_auc_score(y_test_cls, cls_m1.predict_proba(test)[:, 1]))
+
+    return [
+        {"sector": str(sector), "metric": "rmse", "bm2": bm2_rmse, "m1": m1_rmse, "delta": bm2_rmse - m1_rmse, "n_train": int(len(train)), "n_test": int(len(test))},
+        {"sector": str(sector), "metric": "auc", "bm2": bm2_auc, "m1": m1_auc, "delta": m1_auc - bm2_auc, "n_train": int(len(train)), "n_test": int(len(test))},
+    ]
+
+
 def _compute_sector_heterogeneity(
     df: pd.DataFrame,
     *,
@@ -87,45 +137,42 @@ def _compute_sector_heterogeneity(
     seed: int,
     logger,
 ) -> pd.DataFrame:
+    from joblib import Parallel, delayed
+
+    from src.models.train_classification import build_classification_models
+    from src.models.train_regression import build_regression_models
+
     train_end_idx = datacqtr_to_index(train_end_datacqtr)
     test_start_idx = datacqtr_to_index(test_start_datacqtr)
 
-    rows: list[dict[str, object]] = []
+    # Build model templates once, outside the loop
+    reg_bm2_template = build_regression_models(
+        numeric_features=numeric_features_meta, categorical_features=categorical_features, seed=seed
+    )[0].pipeline
+    reg_m1_template = build_regression_models(
+        numeric_features=numeric_features_text, categorical_features=categorical_features, seed=seed
+    )[1].pipeline
+    cls_bm2_template = build_classification_models(
+        numeric_features=numeric_features_meta, categorical_features=categorical_features, seed=seed
+    )[0].pipeline
+    cls_m1_template = build_classification_models(
+        numeric_features=numeric_features_text, categorical_features=categorical_features, seed=seed
+    )[1].pipeline
+
     sectors = [s for s in sorted(df["sector"].dropna().unique().tolist())]
-    for sector in sectors:
-        sub = df.loc[df["sector"] == sector].copy()
-        train = sub.loc[sub["quarter_index"].astype(int) <= train_end_idx]
-        test = sub.loc[sub["quarter_index"].astype(int) >= test_start_idx]
-        if len(train) < 300 or len(test) < 80:
-            continue
+    logger.info(f"Running sector heterogeneity analysis on {len(sectors)} sectors (parallel)")
 
-        from sklearn.metrics import roc_auc_score
+    # Parallel processing across sectors
+    results = Parallel(n_jobs=-1, prefer="threads")(
+        delayed(_evaluate_single_sector)(
+            sector, df, train_end_idx, test_start_idx,
+            reg_bm2_template, reg_m1_template, cls_bm2_template, cls_m1_template
+        )
+        for sector in sectors
+    )
 
-        from src.models.train_classification import build_classification_models
-        from src.models.train_regression import build_regression_models
-        from src.models.evaluation import regression_metrics
-
-        reg_bm2 = build_regression_models(numeric_features=numeric_features_meta, categorical_features=categorical_features, seed=seed)[0].pipeline
-        reg_m1 = build_regression_models(numeric_features=numeric_features_text, categorical_features=categorical_features, seed=seed)[1].pipeline
-        y_train_reg = train["delta_peforw_qavg"].astype(float).to_numpy()
-        y_test_reg = test["delta_peforw_qavg"].astype(float).to_numpy()
-        reg_bm2.fit(train, y_train_reg)
-        reg_m1.fit(train, y_train_reg)
-        bm2_rmse = regression_metrics(y_test_reg, reg_bm2.predict(test))["rmse"]
-        m1_rmse = regression_metrics(y_test_reg, reg_m1.predict(test))["rmse"]
-
-        cls_bm2 = build_classification_models(numeric_features=numeric_features_meta, categorical_features=categorical_features, seed=seed)[0].pipeline
-        cls_m1 = build_classification_models(numeric_features=numeric_features_text, categorical_features=categorical_features, seed=seed)[1].pipeline
-        y_train_cls = train["valuation_upgrade"].astype(int).to_numpy()
-        y_test_cls = test["valuation_upgrade"].astype(int).to_numpy()
-        cls_bm2.fit(train, y_train_cls)
-        cls_m1.fit(train, y_train_cls)
-        bm2_auc = float(roc_auc_score(y_test_cls, cls_bm2.predict_proba(test)[:, 1]))
-        m1_auc = float(roc_auc_score(y_test_cls, cls_m1.predict_proba(test)[:, 1]))
-
-        rows.append({"sector": str(sector), "metric": "rmse", "bm2": bm2_rmse, "m1": m1_rmse, "delta": bm2_rmse - m1_rmse, "n_train": int(len(train)), "n_test": int(len(test))})
-        rows.append({"sector": str(sector), "metric": "auc", "bm2": bm2_auc, "m1": m1_auc, "delta": m1_auc - bm2_auc, "n_train": int(len(train)), "n_test": int(len(test))})
-
+    # Flatten results
+    rows = [row for sector_rows in results for row in sector_rows]
     return pd.DataFrame(rows)
 
 
@@ -155,6 +202,7 @@ def run_all(run_cfg: RunConfig, *, dataset_cfg: DatasetConfig, feature_cfg: Feat
             dev_sample_n=run_cfg.dev_sample_n,
             seed=run_cfg.seed,
             logger=logger,
+            start_year=dataset_cfg.start_year,
         )
         write_parquet(raw, artifacts["raw"])
         logger.info(f"Saved raw snapshot: {artifacts['raw']}")
@@ -204,8 +252,11 @@ def run_all(run_cfg: RunConfig, *, dataset_cfg: DatasetConfig, feature_cfg: Feat
                 artifacts["doc_emb"].parent.mkdir(parents=True, exist_ok=True)
                 np.save(artifacts["doc_emb"], doc_emb.astype("float32", copy=False))
                 logger.info(f"Saved document embeddings: {artifacts['doc_emb']}")
+            except RuntimeError as e:
+                logger.error(f"Document embeddings failed (RuntimeError): {e}")
+                doc_emb = None
             except Exception as e:
-                logger.info(f"Document embeddings failed ({e}); continuing without cached embeddings")
+                logger.warning(f"Document embeddings failed (unexpected error): {e}")
                 doc_emb = None
 
     if topics is None:
@@ -273,31 +324,11 @@ def run_all(run_cfg: RunConfig, *, dataset_cfg: DatasetConfig, feature_cfg: Feat
 
     generate_eda_figures(model_df, figures_dir=fig_dir, logger=logger)
 
-    numeric_meta = [
-        "n_tokens",
-        "n_chars",
-        "lag_peforw_qavg",
-        "lag_eps12mtrailing_qavg",
-        "lag_eps12mtrailing_eoq",
-        "lag_eps12mfwd_qavg",
-        "lag_eps12mfwd_eoq",
-        "lag_eps_lt",
-    ]
-    numeric_text = numeric_meta + [
-        "ani_kw_per1k",
-        "ani_ai_core_per1k",
-        "ani_ml_per1k",
-        "ani_llm_per1k",
-        "ani_genai_per1k",
-        "lm_pos_per1k",
-        "lm_neg_per1k",
-        "lm_unc_per1k",
-        "lm_net_tone_per1k",
-        "ai_topic_share",
-        "ai_sim_mean",
-        "ai_sim_max",
-    ]
-    categorical = ["sector", "datacqtr", "ticker"]
+    # Use centralized feature column registry
+    feat_cols = FeatureColumns()
+    numeric_meta = list(feat_cols.meta_numeric)
+    numeric_text = list(feat_cols.all_numeric_text)
+    categorical = list(feat_cols.categorical)
 
     model_dir.mkdir(parents=True, exist_ok=True)
     results = run_model_benchmarks(
@@ -315,6 +346,9 @@ def run_all(run_cfg: RunConfig, *, dataset_cfg: DatasetConfig, feature_cfg: Feat
     )
     write_csv(results, tbl_dir / "model_results.csv")
     plot_model_results(results, fig_dir / "results_model_benchmarks.png")
+
+    # Generate additional model results plots
+    generate_results_figures(tbl_dir / "model_results.csv", fig_dir, logger=logger)
 
     rolling = run_rolling_benchmarks(
         model_df,
@@ -397,6 +431,12 @@ def main() -> None:
         action="store_true",
         help="Disable BERTopic probability calculation (faster; ai_topic_share becomes a 0/1 indicator).",
     )
+    parser.add_argument(
+        "--start-year",
+        type=int,
+        default=DatasetConfig().start_year,
+        help="Filter data to include only documents from this year onwards (default: 2018). Set to 0 to disable.",
+    )
     args = parser.parse_args()
 
     run_cfg = RunConfig(dev_mode=bool(args.dev), dev_sample_n=int(args.dev_sample_n), recompute=bool(args.recompute))
@@ -407,7 +447,9 @@ def main() -> None:
         embeddings_max_chunks_per_doc=(None if emb_max_chunks <= 0 else emb_max_chunks),
         bertopic_calculate_probabilities=(not bool(args.no_topic_probs)),
     )
-    run_all(run_cfg, dataset_cfg=DatasetConfig(), feature_cfg=feature_cfg)
+    start_year = int(args.start_year) if args.start_year and int(args.start_year) > 0 else None
+    dataset_cfg = DatasetConfig(start_year=start_year)
+    run_all(run_cfg, dataset_cfg=dataset_cfg, feature_cfg=feature_cfg)
 
 
 if __name__ == "__main__":

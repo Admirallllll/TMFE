@@ -40,7 +40,7 @@ def build_classification_models(
     bm2 = Pipeline(
         steps=[
             ("pre", sparse_pre),
-            ("model", LogisticRegression(max_iter=2000, solver="lbfgs")),
+            ("model", LogisticRegression(max_iter=8000, tol=1e-3, solver="lbfgs")),
         ]
     )
 
@@ -53,7 +53,8 @@ def build_classification_models(
                     penalty="l1",
                     solver="saga",
                     C=0.5,
-                    max_iter=4000,
+                    max_iter=15000,  # Increased from 4000 to avoid ConvergenceWarning
+                    tol=1e-3,  # Relaxed from default 1e-4
                 ),
             ),
         ]

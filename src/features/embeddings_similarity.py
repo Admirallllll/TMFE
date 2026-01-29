@@ -110,11 +110,10 @@ def compute_embedding_similarity_features(
     from sklearn.feature_extraction.text import TfidfVectorizer
 
     texts = df[text_col].fillna("").astype(str).tolist()
-    all_texts = list(seed_statements) + texts
+    # Fix data leakage: fit on documents only, then transform seed statements
     vec = TfidfVectorizer(stop_words="english", min_df=2, max_df=0.95, ngram_range=(1, 2))
-    X = vec.fit_transform(all_texts)
-    seed_X = X[: len(seed_statements)]
-    doc_X = X[len(seed_statements) :]
+    doc_X = vec.fit_transform(texts)  # Fit on documents only
+    seed_X = vec.transform(list(seed_statements))  # Transform seed statements
 
     sims = (doc_X @ seed_X.T).toarray()
     out = pd.DataFrame(

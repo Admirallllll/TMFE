@@ -5,6 +5,10 @@ import pandas as pd
 from src.features.ai_dictionary import ai_term_patterns
 
 
+# NOTE: AI_GROUPS allows keyword overlap by design.
+# For example, "llm" counts toward both "llm" and "genai" groups.
+# This is intentional: LLM is both a subset of ML technology and a core component of GenAI.
+# The overlap reflects the semantic hierarchy of AI concepts in earnings call discussions.
 AI_GROUPS: dict[str, tuple[str, ...]] = {
     "ai_core": ("artificial_intelligence", "ai"),
     "ml": ("machine_learning", "ml", "deep_learning", "neural_network"),

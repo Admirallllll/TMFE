@@ -27,6 +27,7 @@ class Paths:
 class DatasetConfig:
     hf_name: str = "glopardo/sp500-earnings-transcripts"
     hf_split: str = "train"
+    start_year: int | None = 2018  # Filter data to start from this year (None = no filter)
 
 
 @dataclass(frozen=True)
@@ -63,6 +64,56 @@ class FeatureConfig:
     embeddings_device: str = "cuda"
 
     bertopic_calculate_probabilities: bool = True
+
+
+@dataclass(frozen=True)
+class FeatureColumns:
+    """Centralized registry of feature column names used in modeling.
+
+    This prevents hardcoding column names across multiple files and makes
+    it easier to add/remove features consistently.
+    """
+
+    # Metadata features (lagged financials + document stats)
+    meta_numeric: tuple[str, ...] = (
+        "n_tokens",
+        "n_chars",
+        "lag_peforw_qavg",
+        "lag_eps12mtrailing_qavg",
+        "lag_eps12mtrailing_eoq",
+        "lag_eps12mfwd_qavg",
+        "lag_eps12mfwd_eoq",
+        "lag_eps_lt",
+    )
+
+    # Text-derived features (ANI + sentiment + topics + embeddings)
+    text_numeric: tuple[str, ...] = (
+        "ani_kw_per1k",
+        "ani_ai_core_per1k",
+        "ani_ml_per1k",
+        "ani_llm_per1k",
+        "ani_genai_per1k",
+        "lm_pos_per1k",
+        "lm_neg_per1k",
+        "lm_unc_per1k",
+        "lm_net_tone_per1k",
+        "ai_topic_share",
+        "ai_sim_mean",
+        "ai_sim_max",
+    )
+
+    # Categorical features
+    categorical: tuple[str, ...] = ("sector", "datacqtr", "ticker")
+
+    # Target columns
+    target_regression: str = "delta_peforw_qavg"
+    target_regression_robust: str = "delta_peforw_eoq"
+    target_classification: str = "valuation_upgrade"
+
+    @property
+    def all_numeric_text(self) -> tuple[str, ...]:
+        """Meta + text features combined for full text models."""
+        return self.meta_numeric + self.text_numeric
 
 
 AI_SEED_STATEMENTS: tuple[str, ...] = (

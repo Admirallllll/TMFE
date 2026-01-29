@@ -43,17 +43,43 @@ def resolve_device(device: str, *, logger=None) -> str:
     return device
 
 
-def _chunk_text_fixed(text: str, *, max_chars: int, max_chunks: int | None) -> list[str]:
+def _chunk_text_by_words(text: str, *, max_chars: int, max_chunks: int | None) -> list[str]:
+    """Chunk text at word boundaries to avoid splitting words mid-token.
+
+    This preserves semantic integrity of the text for embedding computation.
+    """
     text = (text or "").strip()
     if not text:
         return [""]
     if max_chars <= 0 or len(text) <= max_chars:
         return [text]
 
-    chunks = [text[i : i + max_chars] for i in range(0, len(text), max_chars)]
+    words = text.split()
+    chunks: list[str] = []
+    current_words: list[str] = []
+    current_len = 0
+
+    for w in words:
+        word_len = len(w)
+        # +1 for space between words
+        if current_len + word_len + (1 if current_words else 0) > max_chars and current_words:
+            chunks.append(" ".join(current_words))
+            current_words = [w]
+            current_len = word_len
+        else:
+            current_words.append(w)
+            current_len += word_len + (1 if len(current_words) > 1 else 0)
+
+    if current_words:
+        chunks.append(" ".join(current_words))
+
+    if not chunks:
+        return [""]
+
     if max_chunks is None or len(chunks) <= max_chunks:
         return chunks
 
+    # Sample chunks evenly if we have too many
     idx = np.linspace(0, len(chunks) - 1, num=int(max_chunks), dtype=int)
     return [chunks[i] for i in idx]
 
@@ -121,7 +147,7 @@ def compute_document_embeddings(
         batch_doc_ids = []
 
     for i, t in enumerate(texts):
-        chunks = _chunk_text_fixed(t, max_chars=max_chars_per_chunk, max_chunks=max_chunks_per_doc)
+        chunks = _chunk_text_by_words(t, max_chars=max_chars_per_chunk, max_chunks=max_chunks_per_doc)
         for c in chunks:
             batch_chunks.append(c)
             batch_doc_ids.append(i)
