@@ -198,6 +198,9 @@ def build_transfer_labels(
 
     label_payload = work["tags_norm"].map(_apply)
     meta = pd.DataFrame(label_payload.tolist())
+    # Remove tags_norm from meta since it already exists in work to avoid duplicate columns
+    if "tags_norm" in meta.columns:
+        meta = meta.drop(columns=["tags_norm"])
     out = pd.concat([work.reset_index(drop=True), meta.reset_index(drop=True)], axis=1)
     out["label_transfer"] = out["label"].astype("Int64")
 
