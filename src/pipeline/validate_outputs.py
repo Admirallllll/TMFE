@@ -208,7 +208,7 @@ def main():
 
     for name, validator, path in checks:
         passed, errors = validator(path)
-        status = "✓ PASS" if passed else "✗ FAIL"
+        status = "PASS" if passed else "FAIL"
         print(f"{status}: {name}")
         if args.verbose:
             print(f"       Path: {path}")
@@ -219,7 +219,7 @@ def main():
     transfer_model_path = paths.transfer_model_dir / "encoder"
     transfer_metrics_path = paths.transfer_table_dir / "source_metrics.csv"
     passed, errors = validate_transfer_artifacts(transfer_model_path, transfer_metrics_path)
-    status = "✓ PASS" if passed else "✗ FAIL"
+    status = "PASS" if passed else "FAIL"
     print(f"{status}: Transfer artifacts")
     if args.verbose:
         print(f"       Model dir: {transfer_model_path}")
@@ -231,9 +231,9 @@ def main():
     print()
     print("=" * 60)
     if all_passed:
-        print("✓ All validations passed!")
+        print("All validations passed!")
         sys.exit(0)
-    print("✗ Some validations failed. Please fix issues above.")
+    print("Some validations failed. Please fix issues above.")
     sys.exit(1)
 
 

@@ -189,7 +189,8 @@ def build_transfer_labels(
         work["tags_norm"] = work["tags_norm"].map(_parse_tags)
 
     counts = Counter(tag for tags in work["tags_norm"] for tag in tags)
-    eligible = {tag for tag, n in counts.items() if n >= int(min_tag_freq)}
+    always_keep = set(POS_STRONG) | set(NEG_STRONG)
+    eligible = {tag for tag, n in counts.items() if n >= int(min_tag_freq)} | always_keep
 
     def _apply(tags: list[str]) -> dict[str, object]:
         tags_kept = [t for t in tags if t in eligible]

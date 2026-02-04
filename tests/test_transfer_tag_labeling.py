@@ -49,6 +49,16 @@ def test_build_transfer_labels_filters_low_frequency_tags():
     labeled, audit = build_transfer_labels(df, min_tag_freq=2, label_margin=3, logger=_DummyLogger())
     assert "label_transfer" in labeled.columns
     assert set(audit.columns) >= {"tag", "freq", "bucket", "eligible"}
-    # rare tag should be excluded from eligible tag set
     rare_row = audit.loc[audit["tag"] == "unique-rare-tag"].iloc[0]
     assert bool(rare_row["eligible"]) is False
+
+
+def test_neg_strong_tags_not_filtered_by_min_freq():
+    df = pd.DataFrame(
+        {
+            "source_text": ["only one"],
+            "tags_norm": [["missiles"]],
+        }
+    )
+    labeled, _ = build_transfer_labels(df, min_tag_freq=10, label_margin=3, logger=_DummyLogger())
+    assert labeled.loc[0, "label_transfer"] == 0

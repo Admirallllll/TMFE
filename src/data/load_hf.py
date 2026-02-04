@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Iterable
 
+import numpy as np
 import pandas as pd
 
 
@@ -41,7 +42,24 @@ def _missingness_summary(df: pd.DataFrame, cols: Iterable[str]) -> pd.DataFrame:
 def _sample_dev(df: pd.DataFrame, n: int, seed: int) -> pd.DataFrame:
     if n <= 0 or n >= len(df):
         return df
-    return df.sample(n=n, random_state=seed).reset_index(drop=True)
+    if "ticker" not in df.columns:
+        return df.sample(n=n, random_state=seed).reset_index(drop=True)
+
+    counts = df["ticker"].value_counts().sort_index()
+    tickers = counts.index.to_list()
+    rng = np.random.default_rng(seed)
+    rng.shuffle(tickers)
+
+    chosen: list[str] = []
+    total = 0
+    for t in tickers:
+        chosen.append(t)
+        total += int(counts.loc[t])
+        if total >= n:
+            break
+
+    sampled = df.loc[df["ticker"].isin(chosen)].reset_index(drop=True)
+    return sampled
 
 
 def load_hf_dataset_to_df(
