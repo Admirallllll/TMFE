@@ -10,19 +10,23 @@ import pandas as pd
 from src.config import AI_SEED_STATEMENTS, DatasetConfig, FeatureColumns, FeatureConfig, Paths, RunConfig
 from src.data.build_panel import build_panel_with_targets
 from src.data.load_hf import load_hf_dataset_to_df
+from src.data.load_kaggle_ai_media import load_ai_media_dataset
 from src.data.preprocess import preprocess_base_table
 from src.features.ani import compute_ani_features
 from src.features.document_embeddings import compute_document_embeddings
 from src.features.embeddings_similarity import compute_embedding_similarity_features
 from src.features.sentiment_lm import compute_lm_features
 from src.features.tfidf_features import fit_tfidf, top_ngrams
+from src.features.transfer_inference import compute_transfer_features
+from src.features.transfer_tag_labeling import build_transfer_labels
 from src.features.topics_bertopic import compute_topic_features
-from src.models.evaluation import run_model_benchmarks, run_rolling_benchmarks
+from src.models.evaluation import build_transfer_ablation_table, run_model_benchmarks, run_rolling_benchmarks
+from src.models.train_transfer_encoder import train_or_load_transfer_encoder
 from src.utils.io import read_parquet, write_csv, write_parquet
 from src.utils.logging import setup_logging
 from src.utils.time import datacqtr_to_index
 from src.viz.eda_plots import generate_eda_figures
-from src.viz.results_from_tables import generate_results_figures
+from src.viz.results_from_tables import generate_results_figures, generate_transfer_ablation_figures
 from src.viz.results_plots import plot_model_results, plot_pre_post_sector, plot_sector_heterogeneity
 
 
@@ -40,6 +44,7 @@ def _artifact_paths(base_dir: Path, *, dev_mode: bool) -> dict[str, Path]:
         "topics": base_dir / "features_topics.parquet",
         "doc_emb": base_dir / "document_embeddings.npy",
         "emb": base_dir / "features_embeddings.parquet",
+        "transfer": base_dir / "features_transfer.parquet",
         "model_df": base_dir / "modeling_dataset.parquet",
     }
 
@@ -220,6 +225,54 @@ def run_all(run_cfg: RunConfig, *, dataset_cfg: DatasetConfig, feature_cfg: Feat
         write_parquet(panel, artifacts["panel"])
         logger.info(f"Saved panel with targets: {artifacts['panel']}")
 
+    transfer = _maybe_load(artifacts["transfer"], recompute=run_cfg.recompute)
+    transfer_raw_path = paths.transfer_data_dir / "ai_media_raw.parquet"
+    transfer_labeled_path = paths.transfer_data_dir / "ai_media_labeled.parquet"
+    transfer_audit_path = paths.transfer_table_dir / "tag_audit.csv"
+    if transfer is None:
+        paths.transfer_data_dir.mkdir(parents=True, exist_ok=True)
+        paths.transfer_table_dir.mkdir(parents=True, exist_ok=True)
+
+        if (not run_cfg.recompute) and transfer_raw_path.exists():
+            ai_media_raw = read_parquet(transfer_raw_path)
+            logger.info(f"Loaded cached AI media raw data: {transfer_raw_path}")
+        else:
+            ai_media_raw = load_ai_media_dataset(logger=logger)
+            write_parquet(ai_media_raw, transfer_raw_path)
+            logger.info(f"Saved AI media raw data: {transfer_raw_path}")
+
+        if (not run_cfg.recompute) and transfer_labeled_path.exists():
+            ai_media_labeled = read_parquet(transfer_labeled_path)
+            logger.info(f"Loaded cached AI media labeled data: {transfer_labeled_path}")
+        else:
+            ai_media_labeled, tag_audit = build_transfer_labels(
+                ai_media_raw,
+                min_tag_freq=feature_cfg.transfer_min_tag_freq,
+                label_margin=feature_cfg.transfer_label_margin,
+                logger=logger,
+            )
+            write_parquet(ai_media_labeled, transfer_labeled_path)
+            write_csv(tag_audit, transfer_audit_path)
+            logger.info(f"Saved AI media labeled data: {transfer_labeled_path}")
+            logger.info(f"Saved transfer tag audit: {transfer_audit_path}")
+
+        transfer_bundle = train_or_load_transfer_encoder(
+            ai_media_labeled,
+            cfg=feature_cfg,
+            paths=paths,
+            logger=logger,
+            force_retrain=run_cfg.transfer_retrain,
+            max_train_samples=run_cfg.transfer_max_train_samples,
+            seed=run_cfg.seed,
+        )
+        transfer_res = compute_transfer_features(panel, encoder_bundle=transfer_bundle, cfg=feature_cfg, logger=logger)
+        transfer = transfer_res.features
+        write_parquet(transfer, artifacts["transfer"])
+        logger.info(
+            f"Saved transfer features: {artifacts['transfer']} "
+            + f"(model={transfer_res.model_name}, threshold={transfer_res.threshold:.2f})"
+        )
+
     ani = _maybe_load(artifacts["ani"], recompute=run_cfg.recompute)
     if ani is None:
         ani = compute_ani_features(panel, text_col="clean_transcript", token_col="n_tokens", logger=logger)
@@ -302,7 +355,7 @@ def run_all(run_cfg: RunConfig, *, dataset_cfg: DatasetConfig, feature_cfg: Feat
 
     model_df = _maybe_load(artifacts["model_df"], recompute=run_cfg.recompute)
     if model_df is None:
-        model_df = pd.concat([panel.reset_index(drop=True), ani, lm, topics, emb], axis=1)
+        model_df = pd.concat([panel.reset_index(drop=True), ani, lm, topics, emb, transfer], axis=1)
         write_parquet(model_df, artifacts["model_df"])
         logger.info(f"Saved modeling dataset: {artifacts['model_df']}")
 
@@ -327,16 +380,33 @@ def run_all(run_cfg: RunConfig, *, dataset_cfg: DatasetConfig, feature_cfg: Feat
     # Use centralized feature column registry
     feat_cols = FeatureColumns()
     numeric_meta = list(feat_cols.meta_numeric)
-    numeric_text = list(feat_cols.all_numeric_text)
+    transfer_cols = [c for c in feat_cols.text_numeric if c.startswith("transfer_")]
+    text_only_cols = [c for c in feat_cols.text_numeric if c not in set(transfer_cols)]
+    numeric_text_base = numeric_meta + text_only_cols
+    numeric_text_transfer = numeric_meta + list(feat_cols.text_numeric)
     categorical = list(feat_cols.categorical)
 
     model_dir.mkdir(parents=True, exist_ok=True)
+    baseline_results = run_model_benchmarks(
+        model_df,
+        target_reg="delta_peforw_qavg",
+        target_cls="valuation_upgrade",
+        numeric_features_meta=numeric_meta,
+        numeric_features_text=numeric_text_base,
+        categorical_features=categorical,
+        train_end_datacqtr=run_cfg.train_end_datacqtr,
+        test_start_datacqtr=run_cfg.test_start_datacqtr,
+        seed=run_cfg.seed,
+        model_dir=model_dir,
+        logger=logger,
+    )
+
     results = run_model_benchmarks(
         model_df,
         target_reg="delta_peforw_qavg",
         target_cls="valuation_upgrade",
         numeric_features_meta=numeric_meta,
-        numeric_features_text=numeric_text,
+        numeric_features_text=numeric_text_transfer,
         categorical_features=categorical,
         train_end_datacqtr=run_cfg.train_end_datacqtr,
         test_start_datacqtr=run_cfg.test_start_datacqtr,
@@ -350,12 +420,17 @@ def run_all(run_cfg: RunConfig, *, dataset_cfg: DatasetConfig, feature_cfg: Feat
     # Generate additional model results plots
     generate_results_figures(tbl_dir / "model_results.csv", fig_dir, logger=logger)
 
+    ablation = build_transfer_ablation_table(baseline_results, results)
+    if not ablation.empty:
+        write_csv(ablation, tbl_dir / "model_results_transfer_ablation.csv")
+        generate_transfer_ablation_figures(tbl_dir / "model_results_transfer_ablation.csv", fig_dir, logger=logger)
+
     rolling = run_rolling_benchmarks(
         model_df,
         target_reg="delta_peforw_qavg",
         target_cls="valuation_upgrade",
         numeric_features_meta=numeric_meta,
-        numeric_features_text=numeric_text,
+        numeric_features_text=numeric_text_transfer,
         categorical_features=categorical,
         seed=run_cfg.seed,
         logger=logger,
@@ -368,7 +443,7 @@ def run_all(run_cfg: RunConfig, *, dataset_cfg: DatasetConfig, feature_cfg: Feat
         target_reg="delta_peforw_eoq",
         target_cls="valuation_upgrade",
         numeric_features_meta=numeric_meta,
-        numeric_features_text=numeric_text,
+        numeric_features_text=numeric_text_transfer,
         categorical_features=categorical,
         train_end_datacqtr=run_cfg.train_end_datacqtr,
         test_start_datacqtr=run_cfg.test_start_datacqtr,
@@ -389,7 +464,7 @@ def run_all(run_cfg: RunConfig, *, dataset_cfg: DatasetConfig, feature_cfg: Feat
         train_end_datacqtr=run_cfg.train_end_datacqtr,
         test_start_datacqtr=run_cfg.test_start_datacqtr,
         numeric_features_meta=numeric_meta,
-        numeric_features_text=numeric_text,
+        numeric_features_text=numeric_text_transfer,
         categorical_features=["datacqtr", "ticker"],
         seed=run_cfg.seed,
         logger=logger,
@@ -437,15 +512,60 @@ def main() -> None:
         default=DatasetConfig().start_year,
         help="Filter data to include only documents from this year onwards (default: 2018). Set to 0 to disable.",
     )
+    parser.add_argument(
+        "--transfer-device",
+        type=str,
+        default=FeatureConfig().transfer_device,
+        help="Device for transfer encoder training/inference (auto/cuda/cpu/mps).",
+    )
+    parser.add_argument(
+        "--transfer-epochs",
+        type=int,
+        default=FeatureConfig().transfer_epochs,
+        help="Training epochs for transfer encoder.",
+    )
+    parser.add_argument(
+        "--transfer-batch-size",
+        type=int,
+        default=FeatureConfig().transfer_batch_size,
+        help="Batch size for transfer encoder training and inference.",
+    )
+    parser.add_argument(
+        "--transfer-lr",
+        type=float,
+        default=FeatureConfig().transfer_lr,
+        help="Learning rate for transfer encoder.",
+    )
+    parser.add_argument(
+        "--transfer-retrain",
+        action="store_true",
+        help="Force retraining transfer encoder even if cached model exists.",
+    )
+    parser.add_argument(
+        "--transfer-max-train-samples",
+        type=int,
+        default=0,
+        help="Optional cap on labeled source samples for transfer training (0 = no cap).",
+    )
     args = parser.parse_args()
 
-    run_cfg = RunConfig(dev_mode=bool(args.dev), dev_sample_n=int(args.dev_sample_n), recompute=bool(args.recompute))
+    run_cfg = RunConfig(
+        dev_mode=bool(args.dev),
+        dev_sample_n=int(args.dev_sample_n),
+        recompute=bool(args.recompute),
+        transfer_retrain=bool(args.transfer_retrain),
+        transfer_max_train_samples=(None if int(args.transfer_max_train_samples) <= 0 else int(args.transfer_max_train_samples)),
+    )
     emb_max_chunks = int(args.emb_max_chunks)
     feature_cfg = FeatureConfig(
         embeddings_device=str(args.device),
         embeddings_batch_size=int(args.emb_batch_size),
         embeddings_max_chunks_per_doc=(None if emb_max_chunks <= 0 else emb_max_chunks),
         bertopic_calculate_probabilities=(not bool(args.no_topic_probs)),
+        transfer_device=str(args.transfer_device),
+        transfer_epochs=int(args.transfer_epochs),
+        transfer_batch_size=int(args.transfer_batch_size),
+        transfer_lr=float(args.transfer_lr),
     )
     start_year = int(args.start_year) if args.start_year and int(args.start_year) > 0 else None
     dataset_cfg = DatasetConfig(start_year=start_year)

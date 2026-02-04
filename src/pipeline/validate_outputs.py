@@ -11,8 +11,7 @@ from src.config import Paths
 
 
 def validate_panel(path: Path) -> tuple[bool, list[str]]:
-    """Validate panel dataset."""
-    errors = []
+    errors: list[str] = []
     if not path.exists():
         return False, [f"Panel file not found: {path}"]
 
@@ -33,8 +32,7 @@ def validate_panel(path: Path) -> tuple[bool, list[str]]:
 
 
 def validate_ai_topic_share(path: Path) -> tuple[bool, list[str]]:
-    """Validate ai_topic_share feature."""
-    errors = []
+    errors: list[str] = []
     if not path.exists():
         return False, [f"Topics file not found: {path}"]
 
@@ -53,19 +51,15 @@ def validate_ai_topic_share(path: Path) -> tuple[bool, list[str]]:
 
     if null_rate > 0.05:
         errors.append(f"ai_topic_share has {null_rate:.1%} null values (max 5%)")
-
     if nonzero_rate < 0.01:
         errors.append(f"ai_topic_share has only {nonzero_rate:.2%} nonzero values (min 1%)")
-
     if zero_rate > 0.99 and nonzero_rate < 0.01:
         errors.append("ai_topic_share is nearly all zeros - topic identification likely failed")
-
     return len(errors) == 0, errors
 
 
 def validate_model_results(path: Path) -> tuple[bool, list[str]]:
-    """Validate model_results.csv."""
-    errors = []
+    errors: list[str] = []
     if not path.exists():
         return False, [f"Model results not found: {path}"]
 
@@ -79,12 +73,10 @@ def validate_model_results(path: Path) -> tuple[bool, list[str]]:
     if missing:
         errors.append(f"Missing expected models: {missing}")
 
-    # Check regression models have RMSE
     reg = df.loc[df["task"] == "regression"]
     if not reg.empty and reg["rmse"].isna().all():
         errors.append("All regression RMSE values are NaN")
 
-    # Check classification models have AUC
     cls = df.loc[df["task"] == "classification"]
     if not cls.empty and cls["auc"].isna().all():
         errors.append("All classification AUC values are NaN")
@@ -93,8 +85,7 @@ def validate_model_results(path: Path) -> tuple[bool, list[str]]:
 
 
 def validate_figures(figures_dir: Path) -> tuple[bool, list[str]]:
-    """Validate required figures exist and have content."""
-    errors = []
+    errors: list[str] = []
     required = [
         "eda_ai_topic_share_trend.png",
         "results_pre_post_ai_topic_share_by_sector.png",
@@ -103,13 +94,15 @@ def validate_figures(figures_dir: Path) -> tuple[bool, list[str]]:
         "results_model_compare_regression.png",
         "results_model_compare_classification.png",
         "results_delta_vs_benchmark.png",
+        "results_transfer_ablation_regression.png",
+        "results_transfer_ablation_classification.png",
     ]
 
     for fig in required:
         path = figures_dir / fig
         if not path.exists():
             errors.append(f"Required figure not found: {fig}")
-        elif path.stat().st_size < 5000:  # Less than 5KB likely means empty/error
+        elif path.stat().st_size < 5000:
             errors.append(f"Required figure suspiciously small ({path.stat().st_size} bytes): {fig}")
 
     for fig in optional_but_expected:
@@ -121,8 +114,7 @@ def validate_figures(figures_dir: Path) -> tuple[bool, list[str]]:
 
 
 def validate_ani_features(path: Path) -> tuple[bool, list[str]]:
-    """Validate ANI features."""
-    errors = []
+    errors: list[str] = []
     if not path.exists():
         return False, [f"ANI file not found: {path}"]
 
@@ -135,10 +127,59 @@ def validate_ani_features(path: Path) -> tuple[bool, list[str]]:
         errors.append("ani_kw_per1k column not found")
         return False, errors
 
-    col = df["ani_kw_per1k"]
-    null_rate = col.isna().mean()
-    if null_rate > 0.05:
-        errors.append(f"ani_kw_per1k has {null_rate:.1%} null values (max 5%)")
+    if df["ani_kw_per1k"].isna().mean() > 0.05:
+        errors.append(f"ani_kw_per1k has {df['ani_kw_per1k'].isna().mean():.1%} null values (max 5%)")
+
+    return len(errors) == 0, errors
+
+
+def validate_transfer_features(path: Path) -> tuple[bool, list[str]]:
+    errors: list[str] = []
+    if not path.exists():
+        return False, [f"Transfer features file not found: {path}"]
+
+    try:
+        df = pd.read_parquet(path)
+    except Exception as e:
+        return False, [f"Failed to read transfer features: {e}"]
+
+    required = ["transfer_ai_prob", "transfer_ai_logit", "transfer_ai_confidence"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        return False, [f"Missing transfer columns: {missing}"]
+
+    for c in required:
+        col = df[c]
+        if col.isna().all():
+            errors.append(f"{c} is entirely NaN")
+        if int(col.nunique(dropna=True)) <= 1:
+            errors.append(f"{c} has no variation")
+    if ((df["transfer_ai_prob"] < 0) | (df["transfer_ai_prob"] > 1)).any():
+        errors.append("transfer_ai_prob is outside [0,1]")
+
+    return len(errors) == 0, errors
+
+
+def validate_transfer_artifacts(model_dir: Path, metrics_path: Path) -> tuple[bool, list[str]]:
+    errors: list[str] = []
+    if not model_dir.exists():
+        errors.append(f"Transfer model directory not found: {model_dir}")
+    else:
+        if not (model_dir / "config.json").exists():
+            errors.append(f"Missing transfer model config: {model_dir / 'config.json'}")
+        if not (model_dir / "transfer_config.json").exists():
+            errors.append(f"Missing transfer metadata: {model_dir / 'transfer_config.json'}")
+
+    if not metrics_path.exists():
+        errors.append(f"Transfer source metrics not found: {metrics_path}")
+    else:
+        try:
+            m = pd.read_csv(metrics_path)
+            for col in ["auc", "f1", "pr_auc", "accuracy"]:
+                if col not in m.columns or m[col].isna().all():
+                    errors.append(f"Transfer metrics missing/non-informative column: {col}")
+        except Exception as e:
+            errors.append(f"Failed to read transfer source metrics: {e}")
 
     return len(errors) == 0, errors
 
@@ -156,11 +197,11 @@ def main():
     print("=" * 60)
 
     all_passed = True
-    # CRITICAL: Use correct file names that match run_all.py output
     checks = [
         ("Panel dataset", validate_panel, paths.processed_dir / subdir / "panel_with_targets.parquet"),
         ("ANI features", validate_ani_features, paths.processed_dir / subdir / "features_ani.parquet"),
         ("AI topic share", validate_ai_topic_share, paths.processed_dir / subdir / "features_topics.parquet"),
+        ("Transfer features", validate_transfer_features, paths.processed_dir / subdir / "features_transfer.parquet"),
         ("Model results", validate_model_results, paths.outputs_dir / "tables" / subdir / "model_results.csv"),
         ("Required figures", validate_figures, paths.figures_dir / subdir),
     ]
@@ -175,14 +216,25 @@ def main():
             print(f"    - {err}")
             all_passed = False
 
+    transfer_model_path = paths.transfer_model_dir / "encoder"
+    transfer_metrics_path = paths.transfer_table_dir / "source_metrics.csv"
+    passed, errors = validate_transfer_artifacts(transfer_model_path, transfer_metrics_path)
+    status = "✓ PASS" if passed else "✗ FAIL"
+    print(f"{status}: Transfer artifacts")
+    if args.verbose:
+        print(f"       Model dir: {transfer_model_path}")
+        print(f"       Metrics: {transfer_metrics_path}")
+    for err in errors:
+        print(f"    - {err}")
+        all_passed = False
+
     print()
     print("=" * 60)
     if all_passed:
         print("✓ All validations passed!")
         sys.exit(0)
-    else:
-        print("✗ Some validations failed. Please fix issues above.")
-        sys.exit(1)
+    print("✗ Some validations failed. Please fix issues above.")
+    sys.exit(1)
 
 
 if __name__ == "__main__":

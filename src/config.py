@@ -14,6 +14,7 @@ class Paths:
     data_dir: Path = root / "data"
     processed_dir: Path = data_dir / "processed"
     external_dir: Path = data_dir / "external"
+    transfer_data_dir: Path = external_dir / "transfer"
     hf_cache_dir: Path = data_dir / "hf_cache"
 
     outputs_dir: Path = root / "outputs"
@@ -21,6 +22,8 @@ class Paths:
     tables_dir: Path = outputs_dir / "tables"
     models_dir: Path = outputs_dir / "models"
     logs_dir: Path = outputs_dir / "logs"
+    transfer_model_dir: Path = models_dir / "transfer"
+    transfer_table_dir: Path = tables_dir / "transfer"
 
 
 @dataclass(frozen=True)
@@ -41,6 +44,8 @@ class RunConfig:
     test_start_datacqtr: str = "2022Q4"
 
     remove_boilerplate: bool = False
+    transfer_retrain: bool = False
+    transfer_max_train_samples: int | None = None
 
 
 @dataclass(frozen=True)
@@ -64,6 +69,16 @@ class FeatureConfig:
     embeddings_device: str = "cuda"
 
     bertopic_calculate_probabilities: bool = True
+
+    transfer_enabled: bool = True
+    transfer_model_name: str = "distilroberta-base"
+    transfer_epochs: int = 2
+    transfer_lr: float = 2e-5
+    transfer_batch_size: int = 16
+    transfer_max_len: int = 256
+    transfer_device: str = "auto"
+    transfer_min_tag_freq: int = 20
+    transfer_label_margin: int = 3
 
 
 @dataclass(frozen=True)
@@ -100,6 +115,9 @@ class FeatureColumns:
         "ai_topic_share",
         "ai_sim_mean",
         "ai_sim_max",
+        "transfer_ai_prob",
+        "transfer_ai_logit",
+        "transfer_ai_confidence",
     )
 
     # Categorical features

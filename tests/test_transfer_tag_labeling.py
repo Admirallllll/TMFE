@@ -1,0 +1,54 @@
+from __future__ import annotations
+
+import pandas as pd
+
+from src.features.transfer_tag_labeling import build_transfer_labels, label_from_tags, normalize_tag
+
+
+class _DummyLogger:
+    def info(self, *_args, **_kwargs):
+        return None
+
+
+def test_normalize_tag_basic():
+    assert normalize_tag("  OpenAI  ") == "openai"
+    assert normalize_tag("Large Language Model") == "large-language-model"
+    assert normalize_tag("GenAI/LLM") == "genai-llm"
+
+
+def test_label_from_tags_positive_and_negative():
+    pos = label_from_tags(["openai", "llm", "video"], label_margin=3)
+    assert pos["label"] == 1
+    assert pos["reason"] == "high_precision_positive"
+    assert pos["score"] >= 3
+
+    neg = label_from_tags(["missiles", "robotics"], label_margin=3)
+    assert neg["label"] == 0
+    assert neg["reason"] == "high_precision_negative"
+    assert neg["score"] <= -3
+
+
+def test_label_from_tags_conflict_goes_to_review():
+    conflict = label_from_tags(["openai", "missiles"], label_margin=3)
+    assert conflict["label"] is None
+    assert conflict["reason"] == "conflicting_strong_tags"
+
+
+def test_build_transfer_labels_filters_low_frequency_tags():
+    df = pd.DataFrame(
+        {
+            "source_text": ["a", "b", "c", "d"],
+            "tags_norm": [
+                ["openai", "llm"],
+                ["openai", "video"],
+                ["missiles", "video"],
+                ["unique-rare-tag"],
+            ],
+        }
+    )
+    labeled, audit = build_transfer_labels(df, min_tag_freq=2, label_margin=3, logger=_DummyLogger())
+    assert "label_transfer" in labeled.columns
+    assert set(audit.columns) >= {"tag", "freq", "bucket", "eligible"}
+    # rare tag should be excluded from eligible tag set
+    rare_row = audit.loc[audit["tag"] == "unique-rare-tag"].iloc[0]
+    assert bool(rare_row["eligible"]) is False

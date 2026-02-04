@@ -170,3 +170,54 @@ def generate_results_figures(results_path: Path, figures_dir: Path, *, logger=No
         logger.info(f"Generated {len(created)} model results figures")
 
     return created
+
+
+def _metric_for_task(task: str) -> str:
+    return "rmse" if task == "regression" else "auc"
+
+
+def plot_transfer_ablation(results: pd.DataFrame, out_path: Path, *, task: str) -> None:
+    d = results.loc[results["task"] == task].copy()
+    if d.empty:
+        return
+
+    metric = _metric_for_task(task)
+    preferred_order = (
+        ["BM2_metadata_ridge", "M1_text_elasticnet", "M1_text_elasticnet+transfer", "M2_text_hgbr", "M2_text_hgbr+transfer"]
+        if task == "regression"
+        else ["BM2_metadata_logit", "M1_text_logitl1", "M1_text_logitl1+transfer", "M2_text_hgbc", "M2_text_hgbc+transfer"]
+    )
+    d = d.loc[d["model"].isin(preferred_order)].copy()
+    if d.empty:
+        return
+    d["model"] = pd.Categorical(d["model"], categories=preferred_order, ordered=True)
+    d = d.sort_values("model")
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+    colors = ["tab:orange" if "+transfer" in m else "tab:blue" for m in d["model"].astype(str)]
+    ax.barh(d["model"].astype(str), d[metric], color=colors, alpha=0.85)
+    title_metric = "RMSE (lower is better)" if task == "regression" else "AUC (higher is better)"
+    ax.set_title(f"Transfer Ablation: {task.title()} {title_metric}")
+    ax.set_xlabel(metric.upper())
+    ax.grid(True, axis="x", alpha=0.25)
+
+    fig.tight_layout()
+    _save(fig, out_path)
+
+
+def generate_transfer_ablation_figures(results_path: Path, figures_dir: Path, *, logger=None) -> list[Path]:
+    if not results_path.exists():
+        if logger:
+            logger.warning(f"Transfer ablation results file not found: {results_path}")
+        return []
+
+    results = pd.read_csv(results_path)
+    out_reg = figures_dir / "results_transfer_ablation_regression.png"
+    out_cls = figures_dir / "results_transfer_ablation_classification.png"
+
+    plot_transfer_ablation(results, out_reg, task="regression")
+    plot_transfer_ablation(results, out_cls, task="classification")
+    created = [p for p in [out_reg, out_cls] if p.exists()]
+    if logger:
+        logger.info(f"Generated {len(created)} transfer ablation figures")
+    return created

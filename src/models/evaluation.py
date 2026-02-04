@@ -249,3 +249,33 @@ def run_rolling_benchmarks(
             rows.append({"fold": i, "task": "classification", "model": key, "train_end": train_q, "test_end": test_q, **m})
 
     return pd.DataFrame(rows)
+
+
+def build_transfer_ablation_table(base_results: pd.DataFrame, transfer_results: pd.DataFrame) -> pd.DataFrame:
+    """Combine baseline and +transfer runs into one ablation table."""
+    if base_results.empty or transfer_results.empty:
+        return pd.DataFrame()
+
+    keep_base = {
+        "BM2_metadata_ridge",
+        "BM2_metadata_logit",
+        "M1_text_elasticnet",
+        "M2_text_hgbr",
+        "M1_text_logitl1",
+        "M2_text_hgbc",
+    }
+    keep_transfer = {
+        "M1_text_elasticnet",
+        "M2_text_hgbr",
+        "M1_text_logitl1",
+        "M2_text_hgbc",
+    }
+
+    base = base_results.loc[base_results["model"].isin(keep_base)].copy()
+    transfer = transfer_results.loc[transfer_results["model"].isin(keep_transfer)].copy()
+    transfer["model"] = transfer["model"].astype(str) + "+transfer"
+    transfer["variant"] = "transfer"
+    base["variant"] = "baseline"
+
+    out = pd.concat([base, transfer], axis=0, ignore_index=True)
+    return out.reset_index(drop=True)
