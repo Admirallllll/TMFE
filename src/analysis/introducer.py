@@ -58,3 +58,18 @@ def introduced_by_by_sector(call_summary: pd.DataFrame, calls_df: pd.DataFrame) 
         .reset_index()
     )
     return out
+
+
+def ai_first_turn_position_distribution(call_summary: pd.DataFrame) -> pd.DataFrame:
+    if call_summary.empty:
+        return pd.DataFrame(columns=["bucket", "n_calls"])
+    vals = call_summary["first_ai_turn_index_norm"].dropna()
+    if vals.empty:
+        return pd.DataFrame(columns=["bucket", "n_calls"])
+    bins = [0.0, 0.25, 0.5, 0.75, 1.01]
+    labels = ["0-0.25", "0.25-0.5", "0.5-0.75", "0.75-1.0"]
+    bucketed = pd.cut(vals.clip(0, 1), bins=bins, labels=labels, include_lowest=True)
+    out = bucketed.value_counts().reindex(labels, fill_value=0).rename("n_calls").to_frame()
+    out["bucket"] = out.index
+    out = out.reset_index(drop=True)
+    return out
