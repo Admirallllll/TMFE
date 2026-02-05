@@ -257,7 +257,7 @@ def run_all_qa(run_cfg: RunConfig, *, dataset_cfg: DatasetConfig, feature_cfg: F
         plot_placeholder(optional_fig, reason="topic modeling not run")
         results_md.parent.mkdir(parents=True, exist_ok=True)
         with results_md.open("a", encoding="utf-8") as f:
-            f.write(f\"\\nSKIPPED: ai_question_subtopics_trend.png - topic modeling not run\\n\")
+            f.write("\nSKIPPED: ai_question_subtopics_trend.png - topic modeling not run\n")
 
 
 def main() -> None:

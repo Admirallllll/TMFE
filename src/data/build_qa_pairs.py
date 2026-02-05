@@ -4,8 +4,22 @@ import pandas as pd
 
 
 def build_qa_pairs(turns_df: pd.DataFrame, calls_df: pd.DataFrame) -> pd.DataFrame:
+    empty_columns = [
+        "call_id",
+        "question_id",
+        "question_speaker",
+        "question_text",
+        "answer_text_concat",
+        "answer_turn_count",
+        "answer_speakers",
+        "ticker",
+        "datacqtr",
+        "earnings_date",
+        "sector",
+        "industry",
+    ]
     if turns_df.empty:
-        return pd.DataFrame()
+        return pd.DataFrame(columns=empty_columns)
 
     calls_meta = calls_df.set_index("call_id")[
         ["ticker", "datacqtr", "earnings_date", "sector", "industry"]
@@ -39,4 +53,6 @@ def build_qa_pairs(turns_df: pd.DataFrame, calls_df: pd.DataFrame) -> pd.DataFra
                 "industry": meta.get("industry"),
             }
         )
+    if not rows:
+        return pd.DataFrame(columns=empty_columns)
     return pd.DataFrame(rows)

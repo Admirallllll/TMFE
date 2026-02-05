@@ -6,6 +6,27 @@ from src.data.parse_transcripts import extract_turns
 
 
 def build_turns_table(calls_df: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "call_id",
+        "ticker",
+        "datacqtr",
+        "earnings_date",
+        "sector",
+        "industry",
+        "turn_id",
+        "speaker_name",
+        "speaker_role",
+        "speaker_raw_header",
+        "speaker_title",
+        "turn_text",
+        "turn_text_raw",
+        "turn_type",
+        "char_start",
+        "char_end",
+        "question_id",
+        "answer_group_id",
+        "roster_matched",
+    ]
     rows: list[dict[str, object]] = []
     for _, row in calls_df.iterrows():
         call_id = row["call_id"]
@@ -36,4 +57,6 @@ def build_turns_table(calls_df: pd.DataFrame) -> pd.DataFrame:
                     "roster_matched": t.roster_matched,
                 }
             )
-    return pd.DataFrame(rows)
+    if not rows:
+        return pd.DataFrame(columns=columns)
+    return pd.DataFrame(rows, columns=columns)
