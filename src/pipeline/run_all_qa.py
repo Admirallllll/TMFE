@@ -32,6 +32,7 @@ from src.analysis.uncertainty import (
     answers_uncertainty_by_introducer,
 )
 from src.pipeline.validate_outputs import validate_tables
+from src.viz.qa_figures import plot_bar, plot_placeholder, plot_stacked_bar, plot_trend_line
 
 
 def _artifact_paths(paths: Paths, *, dev_mode: bool) -> dict[str, Path]:
@@ -188,6 +189,75 @@ def run_all_qa(run_cfg: RunConfig, *, dataset_cfg: DatasetConfig, feature_cfg: F
     write_csv(unc_intro, tbl_dir / "answers_uncertainty_analystfirst_vs_mgmtfirst.csv")
 
     validate_tables(calls, turns, qa_pairs, call_summary, dev_mode=run_cfg.dev_mode, qa_cfg=qa_cfg)
+
+    # Figures
+    plot_trend_line(
+        q_rate,
+        x_col="datacqtr",
+        y_col="ai_question_rate",
+        title="AI Question Rate by Quarter",
+        out_path=fig_dir / "trend_ai_question_rate_by_quarter.png",
+        logger=logger,
+    )
+    plot_trend_line(
+        a_rate,
+        x_col="datacqtr",
+        y_col="ai_answer_rate",
+        title="AI Answer Rate by Quarter",
+        out_path=fig_dir / "trend_ai_answer_rate_by_quarter.png",
+        logger=logger,
+    )
+    plot_stacked_bar(
+        intro_q,
+        index_col="datacqtr",
+        category_col="introduced_by",
+        value_col="n_calls",
+        title="Who Introduces AI First (by Quarter)",
+        out_path=fig_dir / "who_introduces_ai_first_by_quarter.png",
+        logger=logger,
+    )
+    plot_stacked_bar(
+        intro_s,
+        index_col="sector",
+        category_col="introduced_by",
+        value_col="n_calls",
+        title="Who Introduces AI First (by Sector)",
+        out_path=fig_dir / "who_introduces_ai_first_by_sector.png",
+        logger=logger,
+    )
+    plot_bar(
+        pos,
+        x_col="bucket",
+        y_col="n_calls",
+        title="AI First Turn Position (Normalized)",
+        out_path=fig_dir / "ai_first_turn_position_distribution.png",
+        logger=logger,
+    )
+    plot_bar(
+        unc_ai,
+        x_col="ai_bucket",
+        y_col="uncertainty_mean",
+        title="Answer Uncertainty: AI vs Non-AI",
+        out_path=fig_dir / "answers_uncertainty_ai_vs_nonai.png",
+        logger=logger,
+    )
+    plot_bar(
+        unc_intro,
+        x_col="introduced_by",
+        y_col="uncertainty_mean",
+        title="Answer Uncertainty by Who Introduced AI",
+        out_path=fig_dir / "answers_uncertainty_analystfirst_vs_mgmtfirst.png",
+        logger=logger,
+    )
+
+    # Optional topic plot placeholder + RESULTS note
+    optional_fig = fig_dir / "ai_question_subtopics_trend.png"
+    results_md = paths.outputs_dir / "RESULTS.md"
+    if not optional_fig.exists():
+        plot_placeholder(optional_fig, reason="topic modeling not run")
+        results_md.parent.mkdir(parents=True, exist_ok=True)
+        with results_md.open("a", encoding="utf-8") as f:
+            f.write(f\"\\nSKIPPED: ai_question_subtopics_trend.png - topic modeling not run\\n\")
 
 
 def main() -> None:
