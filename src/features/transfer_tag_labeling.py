@@ -7,6 +7,9 @@ import pandas as pd
 
 
 POS_STRONG: set[str] = {
+    "ai",
+    "artificial-intelligence",
+    "artificialintelligence",
     "openai",
     "chatgpt",
     "gpt",
@@ -86,13 +89,25 @@ def normalize_tag(value: str) -> str:
     return "-".join(part for part in tag.split() if part)
 
 
-def _parse_tags(value: object) -> list[str]:
+def _is_missing_tag(value: object) -> bool:
     if value is None:
+        return True
+    try:
+        if pd.isna(value):
+            return True
+    except Exception:
+        pass
+    s = str(value).strip().lower()
+    return s in {"", "nan", "none", "null"}
+
+
+def _parse_tags(value: object) -> list[str]:
+    if _is_missing_tag(value):
         return []
     if isinstance(value, list):
-        raw = [str(v) for v in value]
+        raw = [str(v) for v in value if not _is_missing_tag(v)]
     elif isinstance(value, (tuple, set)):
-        raw = [str(v) for v in value]
+        raw = [str(v) for v in value if not _is_missing_tag(v)]
     elif isinstance(value, str):
         s = value.strip()
         if not s:
@@ -114,6 +129,10 @@ def _parse_tags(value: object) -> list[str]:
         raw = [str(value)]
 
     return sorted({normalize_tag(v) for v in raw if str(v).strip()})
+
+
+def parse_tags(value: object) -> list[str]:
+    return _parse_tags(value)
 
 
 def _tag_bucket(tag: str) -> str:
@@ -189,7 +208,7 @@ def build_transfer_labels(
         work["tags_norm"] = work["tags_norm"].map(_parse_tags)
 
     counts = Counter(tag for tags in work["tags_norm"] for tag in tags)
-    always_keep = set(POS_STRONG) | set(NEG_STRONG)
+    always_keep = set(POS_STRONG) | set(NEG_STRONG) | set(POS_WEAK) | set(NEG_WEAK)
     eligible = {tag for tag, n in counts.items() if n >= int(min_tag_freq)} | always_keep
 
     def _apply(tags: list[str]) -> dict[str, object]:

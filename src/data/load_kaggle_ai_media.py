@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pandas as pd
 
 from src.config import Paths
+from src.features.transfer_tag_labeling import parse_tags
 
 DATASET_REF = "jannalipenkova/ai-media-dataset"
 TABLE_SUFFIXES: tuple[str, ...] = (".csv", ".parquet", ".json", ".jsonl", ".ndjson")
@@ -49,47 +49,8 @@ def _pick_column(cols: list[str], candidates: tuple[str, ...]) -> str | None:
     return None
 
 
-def _normalize_tag(tag: str) -> str:
-    out = str(tag).strip().lower()
-    for ch in ["_", "/", "\\", ":", ";", ",", ".", "(", ")", "[", "]", "{", "}", "'"]:
-        out = out.replace(ch, " ")
-    out = "-".join(part for part in out.split() if part)
-    return out
-
-
 def _extract_tags(value: object) -> list[str]:
-    if value is None:
-        return []
-    if isinstance(value, (list, tuple, set)):
-        raw = [str(v) for v in value]
-    elif isinstance(value, str):
-        s = value.strip()
-        if not s:
-            return []
-        if s.startswith("[") and s.endswith("]"):
-            try:
-                parsed = json.loads(s)
-                if isinstance(parsed, list):
-                    raw = [str(v) for v in parsed]
-                else:
-                    raw = [s]
-            except json.JSONDecodeError:
-                raw = [x.strip() for x in s.strip("[]").split(",") if x.strip()]
-        else:
-            seps = ["|", ",", ";"]
-            split_found = False
-            for sep in seps:
-                if sep in s:
-                    raw = [x.strip() for x in s.split(sep) if x.strip()]
-                    split_found = True
-                    break
-            if not split_found:
-                raw = [s]
-    else:
-        raw = [str(value)]
-
-    norm = [_normalize_tag(v) for v in raw]
-    return sorted({t for t in norm if t})
+    return parse_tags(value)
 
 
 def _extract_from_files(files: list[Path], *, logger, source_name: str) -> pd.DataFrame:
