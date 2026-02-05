@@ -9,4 +9,7 @@ data/hf_cache/
 # Generated data / artifacts (do not commit)
 data/processed/
 data/external/
-outputs/
+outputs/*
+!outputs/RESULTS.md
+!outputs/tables/
+!outputs/tables/ai_calibration_metrics.csv
