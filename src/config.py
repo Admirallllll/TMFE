@@ -49,6 +49,20 @@ class RunConfig:
 
 
 @dataclass(frozen=True)
+class QAConfig:
+    min_qa_found_rate_dev: float = 0.60
+    min_qa_found_rate_full: float = 0.80
+    min_assigned_char_pct_dev: float = 0.70
+    min_assigned_char_pct_full: float = 0.80
+
+    ai_thr_hi: float = 0.80
+    ai_thr_lo: float = 0.65
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "ai_thr_lo", min(self.ai_thr_lo, self.ai_thr_hi))
+
+
+@dataclass(frozen=True)
 class FeatureConfig:
     ai_terms_per1k_denom: str = "tokens"
 
