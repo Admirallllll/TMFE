@@ -1,9 +1,13 @@
 # --- QA pipeline generated caches (do not commit) ---
 data/raw_snapshot*.parquet
 data/processed/dev/
+data
 outputs/**/dev/
+outputs
 logs/
+src
 *.log
+tests
 
 # --- Local secrets / env ---
 .env
