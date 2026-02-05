@@ -1,12 +1,24 @@
-__pycache__/
-*.pyc
-.DS_Store
-.ipynb_checkpoints/
-.pytest_cache/
-.venv/
-data/hf_cache/
+# --- QA pipeline generated caches (do not commit) ---
+data/raw_snapshot*.parquet
+data/processed/dev/
+outputs/**/dev/
+logs/
+*.log
 
-# Generated data / artifacts (do not commit)
-data/processed/
-data/external/
-outputs/
+# --- Local secrets / env ---
+.env
+.env.*
+*.env
+
+# --- Editor / tooling caches ---
+.vscode/
+.idea/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+dist/
+build/
+*.egg-info/
