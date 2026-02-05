@@ -1,11 +1,27 @@
 from __future__ import annotations
 
 import csv
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+from src.features.ai_dictionary import ai_term_patterns
+
+
+_AI_REGEXES = [re.compile(pat) for pat in ai_term_patterns().values()]
+
+
+def compute_is_ai_kw(text_series: pd.Series) -> pd.Series:
+    def _has_kw(text: str) -> bool:
+        for rgx in _AI_REGEXES:
+            if rgx.search(text):
+                return True
+        return False
+
+    return text_series.fillna("").astype(str).apply(_has_kw)
 
 
 def apply_ai_rules(row: dict[str, object], *, thr_hi: float, thr_lo: float) -> dict[str, object]:
