@@ -36,6 +36,7 @@ class Turn:
         turn_type: str,
         question_id: int | None,
         answer_group_id: int | None,
+        roster_matched: bool,
     ) -> None:
         self.turn_id = turn_id
         self.speaker_name = speaker_name
@@ -48,6 +49,7 @@ class Turn:
         self.turn_type = turn_type
         self.question_id = question_id
         self.answer_group_id = answer_group_id
+        self.roster_matched = roster_matched
 
 
 def normalize_name(name: str) -> str:
@@ -155,26 +157,26 @@ def extract_rosters(transcript_raw: str) -> dict[str, str]:
     return roster
 
 
-def _guess_role(header: str, roster: dict[str, str]) -> tuple[str, str]:
+def _guess_role(header: str, roster: dict[str, str]) -> tuple[str, str, bool]:
     raw = header.strip()
     norm = normalize_name(raw)
     if norm and norm in roster:
-        return norm, roster[norm]
+        return norm, roster[norm], True
 
     lower = raw.lower()
     if "operator" in lower:
-        return norm or raw, "operator"
+        return norm or raw, "operator", False
     if "analyst" in lower:
-        return norm or raw, "analyst"
+        return norm or raw, "analyst", False
     if raw.strip().upper() == "ANALYST":
-        return norm or raw, "analyst"
+        return norm or raw, "analyst", False
     if re.fullmatch(r"[A-Z]{2,6}", raw.strip()):
-        return norm or raw, "management"
+        return norm or raw, "management", False
     if raw.strip() in {"CEO", "CFO", "COO", "CTO", "CMO", "CIO"}:
-        return norm or raw, "management"
+        return norm or raw, "management", False
     if any(title in lower for title in ["ceo", "cfo", "chief", "president", "vp", "vice president", "cto", "coo"]):
-        return norm or raw, "management"
-    return norm or raw, "other"
+        return norm or raw, "management", False
+    return norm or raw, "other", False
 
 
 _SPEAKER_RE = re.compile(r"^(?P<header>[A-Z][^:]{1,120}):\s*(?P<text>.*)$", re.M)
@@ -198,7 +200,7 @@ def extract_turns(qa_text: str, roster: dict[str, str]) -> tuple[list[Turn], dic
             current_header = None
             current_text = []
             return
-        speaker_name, speaker_role = _guess_role(current_header, roster)
+        speaker_name, speaker_role, roster_matched = _guess_role(current_header, roster)
         if speaker_role == "analyst":
             question_id += 1
             answer_group_id = question_id
@@ -230,6 +232,7 @@ def extract_turns(qa_text: str, roster: dict[str, str]) -> tuple[list[Turn], dic
                 turn_type=turn_type,
                 question_id=q_id,
                 answer_group_id=a_id,
+                roster_matched=roster_matched,
             )
         )
         current_header = None

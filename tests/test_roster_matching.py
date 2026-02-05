@@ -22,3 +22,14 @@ def test_extract_rosters_basic():
 def test_normalize_name():
     assert normalize_name("John A. Doe") == "john doe"
     assert normalize_name("JANE SMITH, CFA") == "jane smith"
+
+
+def test_extract_turns_uses_roster():
+    from src.data.parse_transcripts import extract_turns
+
+    qa = "John A. Doe: We are investing in AI."
+    roster = {"john doe": "management"}
+    turns, _diag = extract_turns(qa, roster=roster)
+    assert len(turns) == 1
+    assert turns[0].speaker_role == "management"
+    assert turns[0].roster_matched is True

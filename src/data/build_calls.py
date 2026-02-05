@@ -50,6 +50,7 @@ def _iter_calls(df: pd.DataFrame) -> Iterable[dict[str, object]]:
             "prepared_len": diag["prepared_len"],
             "qa_len": diag["qa_len"],
             "roster_size": len(roster),
+            "roster_map": roster,
         }
 
 

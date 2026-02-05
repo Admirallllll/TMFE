@@ -10,7 +10,8 @@ def build_turns_table(calls_df: pd.DataFrame) -> pd.DataFrame:
     for _, row in calls_df.iterrows():
         call_id = row["call_id"]
         qa_text = row.get("qa_text") or ""
-        turns, _diag = extract_turns(qa_text, roster={})
+        roster_map = row.get("roster_map") or {}
+        turns, _diag = extract_turns(qa_text, roster=roster_map)
         for t in turns:
             rows.append(
                 {
@@ -32,6 +33,7 @@ def build_turns_table(calls_df: pd.DataFrame) -> pd.DataFrame:
                     "char_end": t.char_end,
                     "question_id": t.question_id,
                     "answer_group_id": t.answer_group_id,
+                    "roster_matched": t.roster_matched,
                 }
             )
     return pd.DataFrame(rows)
