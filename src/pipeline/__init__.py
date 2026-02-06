@@ -1,2 +1,0 @@
-"""Pipeline entry points."""
-
