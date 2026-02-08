@@ -33,9 +33,21 @@
 * 用途：作为源域（Source Domain），用于训练深度学习模型以捕捉 AI 相关的语义特征。
 
 
-3. **财务元数据：WRDS (Wharton Research Data Services)**
-* 来源：Compustat 和 CRSP 数据库。
-* 用途：获取标准化的公司财务指标（EPS、R&D 费用、行业代码 SIC/NAICS、市值等），以解决 Hugging Face 数据集中元数据不足的问题 。
+3. **财务元数据：WRDS S&P 500 Compustat Quarterly**
+   * **数据文件**：`Sp500_meta_data.csv`（已从 WRDS 下载，约 10,400+ 条记录）
+   * **时间范围**：2020Q1 - 2025Q1（季度频率）
+   * **核心字段**：
+     | 字段名 | 描述 | 用途 |
+     |--------|------|------|
+     | `tic` / `gvkey` / `conm` | 股票代码 / GVKEY / 公司全称 | 公司标识与匹配 |
+     | `gsector` / `gsubind` / `sic` | GICS 行业大类 / 子行业 / SIC 代码 | 行业分类分析 |
+     | `datacqtr` / `datadate` / `rdq` | 日历季度 / 数据日期 / 报告发布日 | 时间序列对齐与事件研究 |
+     | `epspxq` | 每股收益（排除异常项目） | 业绩表现 (Beat/Miss) 判定 |
+     | `xrdq` | 研发费用（季度） | R&D Intensity 计算 |
+     | `mkvaltq` / `prccq` | 市值 / 季末股价 | 公司规模与市场反应 |
+     | `cshoq` | 普通股发行数量 | 估值与加权计算 |
+   * **数据来源**：WRDS Compustat North America Quarterly Fundamentals
+   * **用途**：与 Earnings Transcripts 基于 `tic` (股票代码) 和 `datacqtr` (季度) 进行合并，解决 Hugging Face 数据集元数据不足的问题，并支持 RQ3 中的截面回归分析。
 
 
 
