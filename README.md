@@ -1,14 +1,15 @@
 # S&P 500 AI Narrative Text Mining
 
-Analysis of AI narratives in S&P 500 earnings call transcripts using transfer learning and conversational dynamics (2020-2025).
+Analysis of AI narratives in S&P 500 earnings call transcripts using dictionary methods, topic modeling, and conversational dynamics (2020-2025).
 
 ## 🎯 Project Overview
 
 This project uses **text mining** techniques to analyze how S&P 500 companies discuss AI in their quarterly earnings calls. We apply:
 
-1. **Transfer Learning**: Fine-tune FinBERT on AI news articles, then apply to earnings transcripts
-2. **Conversational Dynamics**: Analyze who initiates AI discussions (management vs analysts)
-3. **Quadrant Analysis**: Classify companies by their AI narrative patterns
+1. **Dictionary Detection**: Curated keyword/regex matching for AI-related content
+2. **Topic Modeling**: Quarterly LDA topics for AI-focused text (manual naming supported)
+3. **Conversational Dynamics**: Analyze who initiates AI discussions (management vs analysts)
+4. **Quadrant Analysis**: Classify companies by their AI narrative patterns
 
 ## 📁 Project Structure
 
@@ -18,10 +19,6 @@ TEXT-MINING/
 │   ├── preprocessing/          # Text preprocessing
 │   │   ├── transcript_parser.py    # Speech/Q&A splitting
 │   │   └── sentence_splitter.py    # Sentence tokenization
-│   ├── models/                 # ML models
-│   │   ├── ai_news_dataset.py      # Training data loader
-│   │   ├── ai_classifier.py        # FinBERT classifier
-│   │   └── predict.py              # Batch inference
 │   ├── metrics/                # Text mining metrics
 │   │   ├── ai_intensity.py         # AI intensity scores
 │   │   └── initiation_score.py     # Who starts AI discussions
@@ -33,7 +30,6 @@ TEXT-MINING/
 │       └── regression.py           # Cross-sectional regression
 ├── tests/                      # Unit tests
 ├── outputs/
-│   ├── models/                 # Saved model checkpoints
 │   ├── features/               # Computed metrics
 │   └── figures/                # Plots and tables
 ├── run_pipeline.py             # Main orchestration script
@@ -65,14 +61,11 @@ python run_pipeline.py --dev --dev-sample 100
 # Parse transcripts
 python -m src.preprocessing.transcript_parser --input final_dataset.parquet
 
-# Train classifier
-python -m src.models.ai_classifier --train-data outputs/features/ai_news_train.parquet
-
-# Run inference
-python -m src.models.predict --sentences outputs/features/sentences.parquet
-
 # Compute metrics
-python -m src.metrics.ai_intensity --input outputs/features/sentences_with_predictions.parquet
+python -m src.metrics.ai_intensity --input outputs/features/sentences_with_keywords.parquet
+
+# Topic modeling (quarterly)
+python -m src.analysis.topic_modeling --sentences outputs/features/sentences_with_keywords.parquet --filter-ai
 ```
 
 ### 4. Run Tests
@@ -105,19 +98,17 @@ python run_pipeline.py --help
 
 Options:
   --input           Input dataset (default: final_dataset.parquet)
-  --ai-news         AI news training data
   --wrds            WRDS financial metadata
-  --epochs          Training epochs (default: 3)
-  --batch-size      Batch size (default: 16)
   --dev             Development mode
-  --skip-training   Use existing model
+  --ai-method       kw | topic
+  --kw-workers      Keyword detection workers
+  --metrics-workers AI intensity workers
 ```
 
 ## 📚 Data Sources
 
 1. **S&P 500 Earnings Transcripts** - Hugging Face: `kurry/sp500_earnings_transcripts`
-2. **AI News Dataset** - `ai_media_dataset_20250911.csv` 
-3. **WRDS Compustat** - `Sp500_meta_data.csv`
+2. **WRDS Compustat** - `Sp500_meta_data.csv`
 
 ## 🧪 Research Questions
 

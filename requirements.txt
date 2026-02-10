@@ -3,10 +3,7 @@ pandas>=2.0.0
 numpy>=1.24.0
 pyarrow>=14.0.0
 
-# NLP & Deep Learning
-torch>=2.0.0
-transformers>=4.35.0
-sentence-transformers>=2.2.0
+# NLP
 nltk>=3.8.0
 
 # Machine Learning
@@ -20,9 +17,9 @@ scipy>=1.11.0
 matplotlib>=3.7.0
 seaborn>=0.12.0
 plotly>=5.18.0
+wordcloud>=1.9.3
 
 # Data Loading
-datasets>=2.14.0
 python-dotenv>=1.0.0
 
 # Testing

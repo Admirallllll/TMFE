@@ -18,8 +18,8 @@ import os
 
 def classify_companies(
     doc_metrics_df: pd.DataFrame,
-    speech_col: str = 'speech_ml_ai_ratio',
-    qa_col: str = 'qa_ml_ai_ratio',
+    speech_col: str = 'speech_kw_ai_ratio',
+    qa_col: str = 'qa_kw_ai_ratio',
     threshold_method: str = 'median'
 ) -> pd.DataFrame:
     """
@@ -84,11 +84,9 @@ def aggregate_to_company(
     )
     
     agg_df = doc_metrics_df.groupby('ticker').agg({
-        'speech_ml_ai_ratio': 'mean',
-        'qa_ml_ai_ratio': 'mean',
         'speech_kw_ai_ratio': 'mean',
         'qa_kw_ai_ratio': 'mean',
-        'overall_ml_ai_ratio': 'mean',
+        'overall_kw_ai_ratio': 'mean',
         'doc_id': 'count'  # Number of earnings calls
     }).reset_index()
     
@@ -216,7 +214,7 @@ def run_quadrant_analysis(
     print(doc_classified['quadrant'].value_counts())
     
     plot_quadrant_scatter(
-        doc_classified, 'speech_ml_ai_ratio', 'qa_ml_ai_ratio',
+        doc_classified, 'speech_kw_ai_ratio', 'qa_kw_ai_ratio',
         speech_th, qa_th,
         f"{output_dir}/quadrant_scatter_documents.png",
         "Document-Level AI Narrative Quadrants"
@@ -231,7 +229,7 @@ def run_quadrant_analysis(
     print(company_classified['quadrant'].value_counts())
     
     plot_quadrant_scatter(
-        company_classified, 'speech_ml_ai_ratio', 'qa_ml_ai_ratio',
+        company_classified, 'speech_kw_ai_ratio', 'qa_kw_ai_ratio',
         comp_speech_th, comp_qa_th,
         f"{output_dir}/quadrant_scatter_companies.png",
         "Company-Level AI Narrative Quadrants"

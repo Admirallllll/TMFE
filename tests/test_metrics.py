@@ -4,7 +4,6 @@ Unit Tests for Metrics Computation
 
 import pytest
 import pandas as pd
-import numpy as np
 from src.metrics.ai_intensity import compute_section_intensity, compute_document_intensity
 from src.metrics.initiation_score import extract_qa_exchanges, compute_initiation_scores, QAExchange
 from src.baselines.keyword_detector import AIKeywordDetector
@@ -88,8 +87,6 @@ class TestAIIntensity:
                 'They are stable.',
                 'Any AI plans?'
             ],
-            'ml_is_ai': [1, 0, 1, 0, 1, 1, 1, 0, 0, 1],
-            'ml_ai_prob': [0.9, 0.1, 0.85, 0.2, 0.75, 0.88, 0.92, 0.15, 0.1, 0.8],
             'kw_is_ai': [1, 0, 1, 0, 1, 1, 1, 0, 0, 1]
         }
         return pd.DataFrame(data)
@@ -102,8 +99,8 @@ class TestAIIntensity:
         
         speech_row = result[result['section'] == 'speech'].iloc[0]
         assert speech_row['total_sentences'] == 5
-        assert speech_row['ml_ai_sentences'] == 3
-        assert speech_row['ml_ai_ratio'] == 0.6
+        assert speech_row['kw_ai_sentences'] == 3
+        assert speech_row['kw_ai_ratio'] == 0.6
     
     def test_compute_document_intensity(self, sample_sentences_df):
         """Test document-level intensity aggregation."""
@@ -112,8 +109,8 @@ class TestAIIntensity:
         
         assert len(doc_metrics) == 1
         assert doc_metrics['doc_id'].iloc[0] == 'TEST_2024Q1'
-        assert 'speech_ml_ai_ratio' in doc_metrics.columns
-        assert 'qa_ml_ai_ratio' in doc_metrics.columns
+        assert 'speech_kw_ai_ratio' in doc_metrics.columns
+        assert 'qa_kw_ai_ratio' in doc_metrics.columns
 
 
 class TestInitiationScore:
@@ -138,8 +135,7 @@ class TestInitiationScore:
                 'Machine learning is key.',
                 'And automation too.'
             ],
-            'ml_is_ai': [0, 1, 1, 0, 0, 1, 1, 1],
-            'ml_ai_prob': [0.1, 0.9, 0.85, 0.2, 0.15, 0.88, 0.92, 0.8]
+            'kw_is_ai': [0, 1, 1, 0, 0, 1, 1, 1]
         }
         return pd.DataFrame(data)
     

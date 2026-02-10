@@ -1,15 +1,16 @@
 """
 Keyword Detector Module
 
-Dictionary-based baseline for AI topic detection using keyword matching.
-This serves as a benchmark to compare against the transfer learning approach.
+Dictionary-based detector for AI topic detection using keyword matching.
 """
 
 import re
-from typing import List, Dict, Set, Tuple
+from typing import List, Dict, Set, Tuple, Optional
 import pandas as pd
 from dataclasses import dataclass
 from tqdm import tqdm
+import os
+from concurrent.futures import ProcessPoolExecutor
 
 
 @dataclass
@@ -222,11 +223,29 @@ class AIKeywordDetector:
         return float(count)
 
 
+def _process_texts_chunk(texts: List[str]) -> List[Dict[str, int | float | bool]]:
+    detector = AIKeywordDetector()
+    results = []
+    for text in texts:
+        matches = detector.detect(text)
+        counts = detector.count_matches(text)
+        result = {
+            'kw_is_ai': len(matches) > 0,
+            'kw_match_count': len(matches),
+            'kw_ai_score': detector.get_ai_score(text),
+            **{f'kw_{cat}_count': counts[cat] for cat in detector.KEYWORD_DICT.keys()}
+        }
+        results.append(result)
+    return results
+
+
 def compute_keyword_metrics(
     sentences_df: pd.DataFrame,
     text_col: str = 'text',
     doc_id_col: str = 'doc_id',
-    section_col: str = 'section'
+    section_col: str = 'section',
+    num_workers: Optional[int] = None,
+    chunk_size: int = 2000
 ) -> pd.DataFrame:
     """
     Compute keyword-based AI metrics for sentences.
@@ -240,25 +259,38 @@ def compute_keyword_metrics(
     Returns:
         DataFrame with added AI detection columns
     """
-    detector = AIKeywordDetector()
-    
     print("Detecting AI keywords in sentences...")
-    
-    # Add keyword detection columns
-    results = []
-    for idx, row in tqdm(sentences_df.iterrows(), total=len(sentences_df)):
-        text = row[text_col]
-        matches = detector.detect(text)
-        counts = detector.count_matches(text)
-        
-        result = {
-            'kw_is_ai': len(matches) > 0,
-            'kw_match_count': len(matches),
-            'kw_ai_score': detector.get_ai_score(text),
-            **{f'kw_{cat}_count': counts[cat] for cat in detector.KEYWORD_DICT.keys()}
-        }
-        results.append(result)
-    
+
+    texts = sentences_df[text_col].fillna("").astype(str).tolist()
+    total = len(texts)
+    if total == 0:
+        result_df = pd.DataFrame(columns=['kw_is_ai', 'kw_match_count', 'kw_ai_score'])
+        return pd.concat([sentences_df.reset_index(drop=True), result_df], axis=1)
+
+    if num_workers is None:
+        num_workers = max(1, (os.cpu_count() or 2) - 1)
+
+    if num_workers <= 1 or total < chunk_size:
+        detector = AIKeywordDetector()
+        results = []
+        for text in tqdm(texts, total=total):
+            matches = detector.detect(text)
+            counts = detector.count_matches(text)
+            result = {
+                'kw_is_ai': len(matches) > 0,
+                'kw_match_count': len(matches),
+                'kw_ai_score': detector.get_ai_score(text),
+                **{f'kw_{cat}_count': counts[cat] for cat in detector.KEYWORD_DICT.keys()}
+            }
+            results.append(result)
+    else:
+        print(f"Using multiprocessing with {num_workers} workers (chunk_size={chunk_size})")
+        chunks = [texts[i:i + chunk_size] for i in range(0, total, chunk_size)]
+        results = []
+        with ProcessPoolExecutor(max_workers=num_workers) as ex:
+            for chunk_res in tqdm(ex.map(_process_texts_chunk, chunks), total=len(chunks)):
+                results.extend(chunk_res)
+
     result_df = pd.DataFrame(results)
     return pd.concat([sentences_df.reset_index(drop=True), result_df], axis=1)
 

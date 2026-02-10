@@ -6,64 +6,80 @@ Computes AI intensity scores at the document and section level.
 
 from typing import Dict, List, Optional
 import pandas as pd
-import numpy as np
 from tqdm import tqdm
+import os
+from concurrent.futures import ProcessPoolExecutor
+
+
+def _section_groupby_compute(args) -> pd.DataFrame:
+    """
+    Top-level helper for multiprocessing (must be picklable on Windows).
+    """
+    df, doc_id_col, section_col, kw_pred_col = args
+    group_cols = [doc_id_col, section_col]
+    grouped = df.groupby(group_cols, dropna=False)
+    base = grouped.size().rename("total_sentences").reset_index()
+
+    if kw_pred_col in df.columns:
+        kw_stats = grouped[kw_pred_col].agg(['sum', 'mean']).reset_index()
+        kw_stats = kw_stats.rename(columns={'sum': 'kw_ai_sentences', 'mean': 'kw_ai_ratio'})
+        base = base.merge(kw_stats, on=group_cols, how="left")
+
+    return base
 
 
 def compute_section_intensity(
     sentences_df: pd.DataFrame,
     doc_id_col: str = 'doc_id',
     section_col: str = 'section',
-    ml_pred_col: str = 'ml_is_ai',
-    ml_prob_col: str = 'ml_ai_prob',
-    kw_pred_col: str = 'kw_is_ai'
+    kw_pred_col: str = 'kw_is_ai',
+    num_workers: Optional[int] = None,
+    chunk_size: int = 1000
 ) -> pd.DataFrame:
     """
-    Compute AI intensity metrics per document and section.
+    Compute AI intensity metrics per document and section (dictionary-based).
     
     Args:
-        sentences_df: DataFrame with sentence-level predictions
+        sentences_df: DataFrame with sentence-level keyword flags
         doc_id_col: Column for document ID
         section_col: Column for section (speech/qa)
-        ml_pred_col: Column for ML model predictions
-        ml_prob_col: Column for ML probabilities
         kw_pred_col: Column for keyword predictions
         
     Returns:
         DataFrame with document-section level metrics
     """
+    if sentences_df.empty:
+        return pd.DataFrame()
+
+    # Decide on parallelism
+    doc_ids = sentences_df[doc_id_col].unique()
+    total_docs = len(doc_ids)
+
+    if num_workers is None:
+        num_workers = max(1, (os.cpu_count() or 2) - 1)
+
+    if num_workers <= 1 or total_docs < chunk_size:
+        return _section_groupby_compute((
+            sentences_df,
+            doc_id_col,
+            section_col,
+            kw_pred_col
+        ))
+
+    print(f"Computing section intensities with multiprocessing ({num_workers} workers)")
+    chunks = [doc_ids[i:i + chunk_size] for i in range(0, total_docs, chunk_size)]
+    sub_dfs = [sentences_df[sentences_df[doc_id_col].isin(chunk)].copy() for chunk in chunks]
+
     results = []
-    
-    for doc_id in tqdm(sentences_df[doc_id_col].unique(), desc="Computing intensities"):
-        doc_df = sentences_df[sentences_df[doc_id_col] == doc_id]
-        
-        for section in ['speech', 'qa']:
-            section_df = doc_df[doc_df[section_col] == section]
-            
-            if len(section_df) == 0:
-                continue
-            
-            result = {
-                'doc_id': doc_id,
-                'section': section,
-                'total_sentences': len(section_df),
-            }
-            
-            # ML-based metrics
-            if ml_pred_col in section_df.columns:
-                result['ml_ai_sentences'] = section_df[ml_pred_col].sum()
-                result['ml_ai_ratio'] = section_df[ml_pred_col].mean()
-                result['ml_avg_prob'] = section_df[ml_prob_col].mean()
-                result['ml_max_prob'] = section_df[ml_prob_col].max()
-            
-            # Keyword-based metrics
-            if kw_pred_col in section_df.columns:
-                result['kw_ai_sentences'] = section_df[kw_pred_col].sum()
-                result['kw_ai_ratio'] = section_df[kw_pred_col].mean()
-            
-            results.append(result)
-    
-    return pd.DataFrame(results)
+    with ProcessPoolExecutor(max_workers=num_workers) as ex:
+        args_iter = [
+            (sub_df, doc_id_col, section_col, kw_pred_col)
+            for sub_df in sub_dfs
+        ]
+        for part in tqdm(ex.map(_section_groupby_compute, args_iter), total=len(sub_dfs), desc="Computing intensities"):
+            results.append(part)
+
+    return pd.concat(results, ignore_index=True)
 
 
 def compute_document_intensity(
@@ -90,27 +106,19 @@ def compute_document_intensity(
             
             if len(section_row) == 0:
                 result[f'{section}_total_sentences'] = 0
-                result[f'{section}_ml_ai_ratio'] = 0.0
                 result[f'{section}_kw_ai_ratio'] = 0.0
             else:
                 row = section_row.iloc[0]
                 result[f'{section}_total_sentences'] = row.get('total_sentences', 0)
-                result[f'{section}_ml_ai_ratio'] = row.get('ml_ai_ratio', 0.0)
-                result[f'{section}_ml_ai_sentences'] = row.get('ml_ai_sentences', 0)
                 result[f'{section}_kw_ai_ratio'] = row.get('kw_ai_ratio', 0.0)
                 result[f'{section}_kw_ai_sentences'] = row.get('kw_ai_sentences', 0)
-                result[f'{section}_ml_avg_prob'] = row.get('ml_avg_prob', 0.0)
         
         # Compute overall metrics
         total_sents = result.get('speech_total_sentences', 0) + result.get('qa_total_sentences', 0)
         if total_sents > 0:
-            ml_ai_total = result.get('speech_ml_ai_sentences', 0) + result.get('qa_ml_ai_sentences', 0)
-            result['overall_ml_ai_ratio'] = ml_ai_total / total_sents
-            
             kw_ai_total = result.get('speech_kw_ai_sentences', 0) + result.get('qa_kw_ai_sentences', 0)
             result['overall_kw_ai_ratio'] = kw_ai_total / total_sents
         else:
-            result['overall_ml_ai_ratio'] = 0.0
             result['overall_kw_ai_ratio'] = 0.0
         
         results.append(result)
@@ -120,13 +128,15 @@ def compute_document_intensity(
 
 def compute_all_metrics(
     sentences_df: pd.DataFrame,
-    output_dir: str = "outputs/features"
+    output_dir: str = "outputs/features",
+    figures_dir: Optional[str] = None,
+    num_workers: Optional[int] = None
 ) -> Dict[str, pd.DataFrame]:
     """
-    Compute all AI intensity metrics and save.
+    Compute all AI intensity metrics and save (dictionary-based).
     
     Args:
-        sentences_df: Sentence-level data with predictions
+        sentences_df: Sentence-level data with keyword flags
         output_dir: Directory to save outputs
         
     Returns:
@@ -134,9 +144,12 @@ def compute_all_metrics(
     """
     import os
     os.makedirs(output_dir, exist_ok=True)
+    if figures_dir is None:
+        figures_dir = os.path.join(os.path.dirname(output_dir), "figures")
+    os.makedirs(figures_dir, exist_ok=True)
     
     print("Computing section-level metrics...")
-    section_metrics = compute_section_intensity(sentences_df)
+    section_metrics = compute_section_intensity(sentences_df, num_workers=num_workers)
     section_metrics.to_parquet(f"{output_dir}/section_metrics.parquet", index=False)
     
     print("Computing document-level metrics...")
@@ -145,10 +158,16 @@ def compute_all_metrics(
     
     print(f"\n=== AI Intensity Summary ===")
     print(f"Documents analyzed: {len(doc_metrics)}")
-    print(f"Avg Speech AI Ratio (ML): {doc_metrics['speech_ml_ai_ratio'].mean():.3f}")
-    print(f"Avg Q&A AI Ratio (ML): {doc_metrics['qa_ml_ai_ratio'].mean():.3f}")
     print(f"Avg Speech AI Ratio (KW): {doc_metrics['speech_kw_ai_ratio'].mean():.3f}")
     print(f"Avg Q&A AI Ratio (KW): {doc_metrics['qa_kw_ai_ratio'].mean():.3f}")
+
+    # Visualizations
+    if len(doc_metrics) > 0:
+        try:
+            plot_intensity_distributions(doc_metrics, figures_dir)
+            plot_intensity_scatter(doc_metrics, figures_dir)
+        except Exception as e:
+            print(f"Warning: failed to generate AI intensity plots: {e}")
     
     return {
         'section_metrics': section_metrics,
@@ -156,11 +175,78 @@ def compute_all_metrics(
     }
 
 
+def plot_intensity_distributions(
+    doc_metrics_df: pd.DataFrame,
+    output_dir: str
+) -> None:
+    """
+    Plot distributions of AI intensity (Speech vs Q&A).
+    """
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    import os
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+    sns.histplot(doc_metrics_df["speech_kw_ai_ratio"], bins=30, kde=True, ax=axes[0], color="steelblue")
+    axes[0].set_title("Speech AI Intensity Distribution (Dictionary)")
+    axes[0].set_xlabel("AI Ratio")
+    axes[0].set_ylabel("Count")
+
+    sns.histplot(doc_metrics_df["qa_kw_ai_ratio"], bins=30, kde=True, ax=axes[1], color="darkred")
+    axes[1].set_title("Q&A AI Intensity Distribution (Dictionary)")
+    axes[1].set_xlabel("AI Ratio")
+    axes[1].set_ylabel("Count")
+
+    plt.tight_layout()
+    output_path = os.path.join(output_dir, "ai_intensity_distributions.png")
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"Saved AI intensity distribution plot to {output_path}")
+
+
+def plot_intensity_scatter(
+    doc_metrics_df: pd.DataFrame,
+    output_dir: str
+) -> None:
+    """
+    Plot Speech vs Q&A AI intensity scatter with overall intensity color.
+    """
+    import matplotlib.pyplot as plt
+    import os
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    scatter = ax.scatter(
+        doc_metrics_df["speech_kw_ai_ratio"],
+        doc_metrics_df["qa_kw_ai_ratio"],
+        c=doc_metrics_df["overall_kw_ai_ratio"],
+        cmap="viridis",
+        alpha=0.6,
+        s=40
+    )
+    ax.set_xlabel("Speech AI Intensity (Dictionary)")
+    ax.set_ylabel("Q&A AI Intensity (Dictionary)")
+    ax.set_title("Speech vs Q&A AI Intensity (Color = Overall AI Ratio)")
+    ax.grid(True, alpha=0.3)
+    cbar = plt.colorbar(scatter, ax=ax)
+    cbar.set_label("Overall AI Ratio")
+
+    plt.tight_layout()
+    output_path = os.path.join(output_dir, "ai_intensity_scatter.png")
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"Saved AI intensity scatter plot to {output_path}")
+
+
 if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description="Compute AI intensity metrics")
-    parser.add_argument("--input", default="outputs/features/sentences_with_predictions.parquet")
+    parser.add_argument("--input", default="outputs/features/sentences_with_keywords.parquet")
     parser.add_argument("--output-dir", default="outputs/features")
     
     args = parser.parse_args()

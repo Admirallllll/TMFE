@@ -2,3 +2,4 @@
 .env
 *.parquet
 *.json
+outputs/

@@ -68,7 +68,7 @@ def prepare_regression_data(
     # Merge initiation and doc_metrics
     merged = pd.merge(
         initiation,
-        doc_metrics[['doc_id', 'speech_ml_ai_ratio', 'qa_ml_ai_ratio', 'overall_ml_ai_ratio']],
+        doc_metrics[['doc_id', 'speech_kw_ai_ratio', 'qa_kw_ai_ratio', 'overall_kw_ai_ratio']],
         on='doc_id',
         how='left'
     )
@@ -233,12 +233,12 @@ def run_regression_analysis(
     
     # Model 3: AI Intensity as DV (alternative)
     print("\n" + "="*60)
-    print("Model 3: Overall AI Ratio ~ Financial Metrics")
+    print("Model 3: Overall AI Ratio (KW) ~ Financial Metrics")
     print("="*60)
     
     model3 = run_regression(
         reg_df,
-        dv='overall_ml_ai_ratio',
+        dv='overall_kw_ai_ratio',
         ivs=['log_mktcap', 'rd_intensity', 'eps_positive']
     )
     print(model3.summary())
@@ -249,7 +249,7 @@ def run_regression_analysis(
         [model1, model2, model3],
         stars=True,
         float_format='%0.4f',
-        model_names=['AI Initiation (1)', 'AI Initiation (2)', 'AI Ratio (3)']
+        model_names=['AI Initiation (1)', 'AI Initiation (2)', 'AI Ratio (3, KW)']
     )
     
     with open(f"{output_dir}/regression_summary.txt", 'w') as f:
