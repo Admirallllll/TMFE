@@ -20,7 +20,7 @@ def classify_companies(
     doc_metrics_df: pd.DataFrame,
     speech_col: str = 'speech_kw_ai_ratio',
     qa_col: str = 'qa_kw_ai_ratio',
-    threshold_method: str = 'median'
+    threshold_method: str = 'mean'
 ) -> pd.DataFrame:
     """
     Classify companies into quadrants based on AI intensity.
@@ -29,27 +29,32 @@ def classify_companies(
         doc_metrics_df: Document-level metrics
         speech_col: Column for speech AI intensity
         qa_col: Column for Q&A AI intensity
-        threshold_method: 'median' or 'mean' for cutoff
+        threshold_method: 'mean' or 'median_nonzero' for cutoff
         
     Returns:
         DataFrame with quadrant labels
     """
     df = doc_metrics_df.copy()
     
-    # Compute thresholds
-    if threshold_method == 'median':
-        speech_threshold = df[speech_col].median()
-        qa_threshold = df[qa_col].median()
+    # Compute thresholds (avoid zero-inflation bias)
+    if threshold_method == 'median_nonzero':
+        speech_vals = df.loc[df[speech_col] > 0, speech_col]
+        qa_vals = df.loc[df[qa_col] > 0, qa_col]
+        speech_threshold = float(speech_vals.median()) if len(speech_vals) > 0 else 0.0
+        qa_threshold = float(qa_vals.median()) if len(qa_vals) > 0 else 0.0
+    elif threshold_method == 'mean':
+        speech_threshold = float(df[speech_col].mean())
+        qa_threshold = float(df[qa_col].mean())
     else:
-        speech_threshold = df[speech_col].mean()
-        qa_threshold = df[qa_col].mean()
-    
-    print(f"Thresholds: Speech={speech_threshold:.4f}, Q&A={qa_threshold:.4f}")
+        raise ValueError("threshold_method must be one of: mean, median_nonzero")
+
+    print(f"Thresholds ({threshold_method}): Speech={speech_threshold:.4f}, Q&A={qa_threshold:.4f}")
     
     # Classify
     def classify_row(row):
-        high_speech = row[speech_col] >= speech_threshold
-        high_qa = row[qa_col] >= qa_threshold
+        # High = strictly above the threshold (prevents zeros from being "High")
+        high_speech = row[speech_col] > speech_threshold
+        high_qa = row[qa_col] > qa_threshold
         
         if high_speech and high_qa:
             return 'Aligned'
@@ -208,7 +213,7 @@ def run_quadrant_analysis(
     
     # Document-level analysis
     print("\nDocument-level quadrant analysis...")
-    doc_classified, speech_th, qa_th = classify_companies(doc_metrics)
+    doc_classified, speech_th, qa_th = classify_companies(doc_metrics, threshold_method='mean')
     
     print("\nQuadrant Distribution (Documents):")
     print(doc_classified['quadrant'].value_counts())
@@ -223,7 +228,7 @@ def run_quadrant_analysis(
     # Company-level analysis
     print("\nCompany-level quadrant analysis...")
     company_agg = aggregate_to_company(doc_metrics)
-    company_classified, comp_speech_th, comp_qa_th = classify_companies(company_agg)
+    company_classified, comp_speech_th, comp_qa_th = classify_companies(company_agg, threshold_method='mean')
     
     print("\nQuadrant Distribution (Companies):")
     print(company_classified['quadrant'].value_counts())

@@ -1,0 +1,11 @@
+Top-Right Document: NVDA_2023Q4
+  Speech Ratio: 0.4028
+  Q&A Ratio:    0.2219
+
+Top-Left (Passive) Document: NVDA_2024Q3
+  Speech Ratio: 0.0000
+  Q&A Ratio:    0.3700
+
+Right-Most Document: NVDA_2023Q4
+  Speech Ratio: 0.4028
+  Q&A Ratio:    0.2219
