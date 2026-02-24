@@ -3,3 +3,4 @@
 *.parquet
 *.json
 outputs/
+__pycache__/

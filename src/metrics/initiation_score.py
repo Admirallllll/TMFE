@@ -250,14 +250,17 @@ def compute_all_initiation_metrics(
     
     # Save
     scores_df.to_parquet(f"{output_dir}/initiation_scores.parquet", index=False)
-    
+
     print(f"\n=== Initiation Score Summary ===")
-    print(f"Documents with AI exchanges: {(scores_df['total_ai_exchanges'] > 0).sum()}")
-    print(f"Avg AI exchanges per doc: {scores_df['total_ai_exchanges'].mean():.1f}")
-    print(f"Avg analyst-initiated ratio: {scores_df['analyst_initiated_ratio'].mean():.3f}")
-    print(f"Avg management-pivot ratio: {scores_df['management_pivot_ratio'].mean():.3f}")
-    print(f"Avg AI initiation score: {scores_df['ai_initiation_score'].mean():.3f}")
-    print("  (Higher = more management-driven)")
+    if len(scores_df) == 0 or 'total_ai_exchanges' not in scores_df.columns:
+        print("No Q&A exchanges found in the data.")
+    else:
+        print(f"Documents with AI exchanges: {(scores_df['total_ai_exchanges'] > 0).sum()}")
+        print(f"Avg AI exchanges per doc: {scores_df['total_ai_exchanges'].mean():.1f}")
+        print(f"Avg analyst-initiated ratio: {scores_df['analyst_initiated_ratio'].mean():.3f}")
+        print(f"Avg management-pivot ratio: {scores_df['management_pivot_ratio'].mean():.3f}")
+        print(f"Avg AI initiation score: {scores_df['ai_initiation_score'].mean():.3f}")
+        print("  (Higher = more management-driven)")
 
     # Visualizations
     if len(scores_df) > 0:

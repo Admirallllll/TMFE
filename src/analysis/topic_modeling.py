@@ -192,6 +192,110 @@ def run_quarterly_topic_modeling(
     return topics_df
 
 
+
+def merge_topic_features(
+    doc_metrics_path: str,
+    topics_dir: str,
+    output_path: Optional[str] = None,
+    use_mixture: bool = False,
+) -> pd.DataFrame:
+    """
+    Merge LDA topic features into a document-level DataFrame for regression.
+
+    For each document, provides:
+      - dominant_topic          : The single most probable topic (integer)
+      - topic_<K>_dummy         : One-hot indicator for dominant topic K
+      - topic_<K>_prop (optional): Proportion of topic K in the document mixture
+                                   (only when use_mixture=True)
+
+    These features can then be added as IVs in regression.py (Model 5),
+    testing whether the *type* of AI discussion topic predicts initiation scores
+    \u2014 an interpretation that directly connects LDA output to economic outcomes.
+
+    Args:
+        doc_metrics_path: Path to the document-level metrics parquet.
+        topics_dir:       Directory containing doc_topics_<YEAR>Q<Q>.parquet files
+                          (output of run_quarterly_topic_modeling).
+        output_path:      If provided, save the merged DataFrame to this parquet path.
+        use_mixture:      If True, include raw topic proportion columns.
+
+    Returns:
+        DataFrame with doc_id, year, quarter + topic feature columns.
+    """
+    import glob
+
+    doc_metrics = pd.read_parquet(doc_metrics_path)
+
+    # Collect all per-quarter doc-topic files
+    pattern = os.path.join(topics_dir, "doc_topics_*.parquet")
+    files = sorted(glob.glob(pattern))
+
+    if not files:
+        print(f"[merge_topic_features] No doc_topics_*.parquet files found in {topics_dir}.")
+        return doc_metrics
+
+    frames = []
+    for fpath in files:
+        try:
+            df = pd.read_parquet(fpath)
+            frames.append(df)
+        except Exception as e:
+            print(f"  Warning: could not load {fpath}: {e}")
+
+    if not frames:
+        print("[merge_topic_features] No topic files could be loaded.")
+        return doc_metrics
+
+    doc_topic_df = pd.concat(frames, ignore_index=True)
+
+    # Keep only doc_id + topic columns
+    topic_cols = [c for c in doc_topic_df.columns if c.startswith("topic_") and c != "dominant_topic"]
+
+    # Dominant topic as integer category
+    doc_topic_df["dominant_topic_id"] = (
+        doc_topic_df["dominant_topic"]
+        .str.replace("topic_", "")
+        .astype(int)
+    )
+
+    # One-hot dummies for dominant topic
+    dummies = pd.get_dummies(doc_topic_df["dominant_topic_id"], prefix="dom_topic")
+    doc_topic_df = pd.concat([doc_topic_df[["doc_id", "dominant_topic_id"]], dummies], axis=1)
+
+    # Optionally attach raw mixture proportions
+    if use_mixture:
+        raw_props = pd.read_parquet(files[0])  # representative to get column names
+        all_topic_frames = [pd.read_parquet(f)[["doc_id"] + topic_cols]
+                            for f in files if pd.read_parquet(f).shape[1] > 2]
+        # Re-read for safety
+        prop_frames = []
+        for fpath in files:
+            try:
+                df = pd.read_parquet(fpath)
+                avail = [c for c in topic_cols if c in df.columns]
+                if avail:
+                    prop_frames.append(df[["doc_id"] + avail])
+            except Exception:
+                pass
+        if prop_frames:
+            prop_df = pd.concat(prop_frames, ignore_index=True)
+            prop_df.columns = ["doc_id"] + [f"mix_{c}" for c in prop_df.columns[1:]]
+            doc_topic_df = doc_topic_df.merge(prop_df, on="doc_id", how="left")
+
+    # Merge with doc_metrics
+    merged = doc_metrics.merge(doc_topic_df, on="doc_id", how="left")
+
+    print(f"[merge_topic_features] Merged {len(doc_topic_df)} doc-topic rows with {len(doc_metrics)} doc-metrics rows.")
+    print(f"  Topic feature columns added: {[c for c in merged.columns if c.startswith('dom_topic') or c.startswith('mix_')]}")
+
+    if output_path:
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+        merged.to_parquet(output_path, index=False)
+        print(f"  Saved merged features → {output_path}")
+
+    return merged
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -203,6 +307,12 @@ if __name__ == "__main__":
     parser.add_argument("--n-topics", type=int, default=20)
     parser.add_argument("--top-words", type=int, default=12)
     parser.add_argument("--filter-ai", action="store_true", help="Use only kw_is_ai sentences")
+    parser.add_argument(
+        "--merge-features",
+        action="store_true",
+        help="After modeling, merge topic features into document metrics"
+    )
+    parser.add_argument("--doc-metrics", default="outputs/features/document_metrics.parquet")
 
     args = parser.parse_args()
 
@@ -213,5 +323,14 @@ if __name__ == "__main__":
         args.end_year,
         n_topics=args.n_topics,
         top_n_words=args.top_words,
-        filter_ai=args.filter_ai
+        filter_ai=args.filter_ai,
     )
+
+    if args.merge_features:
+        topics_dir = os.path.join(args.output_dir, "topics")
+        output_path = os.path.join(args.output_dir, "doc_metrics_with_topics.parquet")
+        merge_topic_features(
+            doc_metrics_path=args.doc_metrics,
+            topics_dir=topics_dir,
+            output_path=output_path,
+        )

@@ -3,13 +3,19 @@ Regression Analysis Module
 
 Cross-sectional regression analysis:
 - DV: AI Initiation Score (management proactiveness)
-- IVs: R&D Intensity, Lagged Returns, Beat/Miss Earnings, Market Cap, Industry
+- IVs: R&D Intensity, Lagged Returns, Beat/Miss Earnings, Market Cap, Industry,
+       Analyst-Initiated Ratio, Management-Pivot Ratio
+
+Evaluation:
+- R² (in-sample)
+- Kendall's Tau (rank correlation of predictions vs actuals) — professor's preferred metric
 """
 
 import pandas as pd
 import numpy as np
 import statsmodels.api as sm
 from statsmodels.iolib.summary2 import summary_col
+from scipy.stats import kendalltau
 from typing import Optional, Dict, List, Tuple
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -33,12 +39,21 @@ def prepare_regression_data(
         Merged DataFrame ready for regression
     """
     print("Loading data...")
-    
+
     # Load data
     initiation = pd.read_parquet(initiation_scores_path)
     doc_metrics = pd.read_parquet(doc_metrics_path)
     wrds = pd.read_csv(wrds_data_path, low_memory=False)
-    
+
+    # Handle empty initiation scores DataFrame
+    if len(initiation) == 0 or 'doc_id' not in initiation.columns:
+        print("Warning: No initiation scores available. Using doc_metrics only.")
+        initiation = doc_metrics[['doc_id']].copy()
+        initiation['ai_initiation_score'] = 0.5  # Neutral default
+        initiation['total_ai_exchanges'] = 0
+        initiation['analyst_initiated_ratio'] = 0.0
+        initiation['management_pivot_ratio'] = 0.0
+
     # Parse doc_id into ticker, year, quarter
     def parse_doc_id(doc_id):
         parts = str(doc_id).rsplit('_', 1)
@@ -66,8 +81,15 @@ def prepare_regression_data(
     doc_metrics = doc_metrics.drop('_parsed', axis=1)
     
     # Merge initiation and doc_metrics
+    # Include initiation sub-columns that carry linguistic/sociolinguistic signal
+    init_cols = ['doc_id']
+    for col in ['ai_initiation_score', 'total_ai_exchanges', 'analyst_initiated_ratio',
+                'management_pivot_ratio', 'analyst_only_count', 'analyst_initiated_count',
+                'management_pivot_count']:
+        if col in initiation.columns:
+            init_cols.append(col)
     merged = pd.merge(
-        initiation,
+        initiation[init_cols],
         doc_metrics[['doc_id', 'speech_kw_ai_ratio', 'qa_kw_ai_ratio', 'overall_kw_ai_ratio']],
         on='doc_id',
         how='left'
@@ -129,6 +151,35 @@ def prepare_regression_data(
     print(f"Missing log_mktcap: {final['log_mktcap'].isna().sum()}")
     
     return final
+
+
+def compute_kendall_tau(
+    results: sm.regression.linear_model.RegressionResultsWrapper,
+    df: pd.DataFrame,
+    dv: str,
+    ivs: List[str],
+) -> Tuple[float, float]:
+    """
+    Compute Kendall's Tau rank correlation between fitted values and actuals.
+
+    This is the professor's preferred evaluation metric for economic models,
+    since ranking consistency matters more than point-accuracy in finance.
+
+    Args:
+        results: Fitted statsmodels OLS results.
+        df:      DataFrame used in regression.
+        dv:      Dependent variable column name.
+        ivs:     Independent variable column names.
+
+    Returns:
+        Tuple of (tau, p_value).
+    """
+    cols = [dv] + ivs
+    reg_df = df[cols].dropna()
+    y_true = reg_df[dv].values
+    y_pred = results.fittedvalues.values
+    tau, p_val = kendalltau(y_true, y_pred)
+    return tau, p_val
 
 
 def run_regression(
@@ -204,61 +255,95 @@ def run_regression_analysis(
     reg_df.to_parquet(f"{output_dir}/../features/regression_dataset.parquet", index=False)
     
     results = {}
-    
-    # Model 1: Basic - AI Initiation Score ~ Size + R&D
+    ivs_base = ['log_mktcap', 'rd_intensity']
+    ivs_fin  = ['log_mktcap', 'rd_intensity', 'eps_positive']
+
+    # Build list of available initiation sub-features to use as IVs
+    initiation_ivs = [iv for iv in ['analyst_initiated_ratio', 'management_pivot_ratio']
+                      if iv in reg_df.columns]
+
+    def _print_tau(model, dv, ivs, label):
+        """Compute and print Kendall Tau for a fitted model."""
+        try:
+            tau, p_val = compute_kendall_tau(model, reg_df, dv, ivs)
+            print(f"  [{label}] Kendall's Tau = {tau:.4f}  (p = {p_val:.4f})")
+            return tau, p_val
+        except Exception as e:
+            print(f"  [Warning] Could not compute Kendall Tau: {e}")
+            return None, None
+
+    # ------------------------------------------------------------------
+    # Model 1: Basic — AI Initiation Score ~ Size + R&D
+    # ------------------------------------------------------------------
     print("\n" + "="*60)
     print("Model 1: AI Initiation Score ~ Size + R&D Intensity")
     print("="*60)
-    
-    model1 = run_regression(
-        reg_df,
-        dv='ai_initiation_score',
-        ivs=['log_mktcap', 'rd_intensity']
-    )
+    model1 = run_regression(reg_df, dv='ai_initiation_score', ivs=ivs_base)
     print(model1.summary())
+    _print_tau(model1, 'ai_initiation_score', ivs_base, 'Model 1')
     results['model1'] = model1
-    
-    # Model 2: Add EPS
+
+    # ------------------------------------------------------------------
+    # Model 2: Add EPS Beat/Miss
+    # ------------------------------------------------------------------
     print("\n" + "="*60)
     print("Model 2: Add EPS (Beat/Miss)")
     print("="*60)
-    
-    model2 = run_regression(
-        reg_df,
-        dv='ai_initiation_score',
-        ivs=['log_mktcap', 'rd_intensity', 'eps_positive']
-    )
+    model2 = run_regression(reg_df, dv='ai_initiation_score', ivs=ivs_fin)
     print(model2.summary())
+    _print_tau(model2, 'ai_initiation_score', ivs_fin, 'Model 2')
     results['model2'] = model2
-    
-    # Model 3: AI Intensity as DV (alternative)
+
+    # ------------------------------------------------------------------
+    # Model 3: Overall AI Ratio as DV
+    # ------------------------------------------------------------------
     print("\n" + "="*60)
     print("Model 3: Overall AI Ratio (KW) ~ Financial Metrics")
     print("="*60)
-    
-    model3 = run_regression(
-        reg_df,
-        dv='overall_kw_ai_ratio',
-        ivs=['log_mktcap', 'rd_intensity', 'eps_positive']
-    )
+    model3 = run_regression(reg_df, dv='overall_kw_ai_ratio', ivs=ivs_fin)
     print(model3.summary())
+    _print_tau(model3, 'overall_kw_ai_ratio', ivs_fin, 'Model 3')
     results['model3'] = model3
-    
-    # Create summary table
+
+    # ------------------------------------------------------------------
+    # Model 4: Add Initiation Sub-features (sociolinguistic features)
+    # These capture: who drives AI talk — analyst pressure vs management proactiveness
+    # ------------------------------------------------------------------
+    if initiation_ivs:
+        ivs_init = ivs_fin + initiation_ivs
+        print("\n" + "="*60)
+        print(f"Model 4: AI Initiation Score ~ Financial + Initiation Features")
+        print(f"  Initiation IVs: {initiation_ivs}")
+        print("="*60)
+        model4 = run_regression(reg_df, dv='ai_initiation_score', ivs=ivs_init)
+        print(model4.summary())
+        _print_tau(model4, 'ai_initiation_score', ivs_init, 'Model 4')
+        results['model4'] = model4
+    else:
+        print("\n[Skipping Model 4: initiation sub-features not available in dataset]")
+
+    # ------------------------------------------------------------------
+    # Summary table
+    # ------------------------------------------------------------------
+    model_list   = [results[k] for k in ['model1', 'model2', 'model3'] if k in results]
+    model_labels = ['AI Init (1)', 'AI Init (2)', 'AI Ratio (3)']
+    if 'model4' in results:
+        model_list.append(results['model4'])
+        model_labels.append('AI Init+Initiation (4)')
+
     summary = summary_col(
-        [model1, model2, model3],
+        model_list,
         stars=True,
         float_format='%0.4f',
-        model_names=['AI Initiation (1)', 'AI Initiation (2)', 'AI Ratio (3, KW)']
+        model_names=model_labels
     )
-    
     with open(f"{output_dir}/regression_summary.txt", 'w') as f:
         f.write(str(summary))
-    print(f"\nSaved regression summary to {output_dir}/regression_summary.txt")
-    
-    # Plot coefficient comparison
+    print(f"\nSaved regression summary → {output_dir}/regression_summary.txt")
+
+    # Coefficient plot (using most complete financial model)
     plot_coefficients(results, f"{output_dir}/regression_coefficients.png")
-    
+
     return results
 
 

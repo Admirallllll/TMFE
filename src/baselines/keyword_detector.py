@@ -40,7 +40,7 @@ class AIKeywordDetector:
             'large language model', 'llm', 'llms',
             'copilot', 'co-pilot', 'gemini', 'claude', 'bard',
             'openai', 'anthropic', 'midjourney', 'dall-e', 'stable diffusion',
-            'generative model', 'foundation model', 'transformer model'
+            'generative model', 'foundation model', 'transformer model', 'deepseek'
         ],
         'ml_techniques': [
             'natural language processing', 'nlp', 'computer vision',
@@ -64,7 +64,7 @@ class AIKeywordDetector:
         'ai_infrastructure': [
             'gpu', 'gpus', 'nvidia', 'cuda', 'tensor',
             'cloud computing', 'edge computing', 'ai chip',
-            'ai infrastructure', 'compute capacity', 'training data'
+            'ai infrastructure', 'compute capacity', 'training data', 'data center'
         ],
         'ai_applications': [
             'chatbot', 'virtual assistant', 'digital assistant',
