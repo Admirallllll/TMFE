@@ -197,32 +197,55 @@ class TranscriptParser:
     def find_qa_start_index(self, turns: List[Dict]) -> int:
         """
         Find the index where Q&A section begins.
-        
+
         Returns:
             Index of first Q&A turn, or len(turns) if no Q&A found
         """
+        # Opening operator/IR turns often mention "Q&A" as a future event;
+        # only allow pattern matching after prepared remarks have appeared.
+        seen_speech_content = False
+
         for i, turn in enumerate(turns):
             text = turn.get('text', '')
             speaker = turn.get('speaker', '')
-            
-            # Operator announcing Q&A
-            if 'operator' in speaker.lower():
-                if self.qa_pattern.search(text):
+            is_operator = 'operator' in speaker.lower()
+
+            # Check QA patterns BEFORE updating flag, so a turn cannot
+            # both introduce the flag and trigger a match in the same pass.
+            if seen_speech_content:
+                if is_operator and self.qa_pattern.search(text):
                     return i
-            
-            # Check text for Q&A patterns
-            if self.qa_pattern.search(text[:500] if len(text) > 500 else text):
+                if self.qa_pattern.search(text[:500] if len(text) > 500 else text):
+                    return i
+
+            # Update flag for subsequent iterations
+            if not is_operator:
+                role = self.classify_role(speaker, text)
+                if role in ('management', 'unknown'):
+                    seen_speech_content = True
+
+        # Heuristic: look for operator turn that introduces Q&A
+        # after at least one non-operator turn.
+        seen_non_operator = False
+        for i, turn in enumerate(turns):
+            speaker = turn.get('speaker', '')
+            if 'operator' not in speaker.lower():
+                seen_non_operator = True
+                continue
+            if not seen_non_operator:
+                continue
+            text = turn.get('text', '').strip()
+            if 'first question' in text.lower() or 'operator instructions' in text.lower():
                 return i
-        
-        # Heuristic: if no clear Q&A marker, look for first question
+
+        # Last resort: first analyst question
         for i, turn in enumerate(turns):
             text = turn.get('text', '').strip()
-            # First non-management speaker asking a question
             if '?' in text[:300]:
                 role = self.classify_role(turn.get('speaker', ''), text)
                 if role == 'analyst':
-                    return max(0, i - 1)  # Include operator intro
-        
+                    return max(0, i - 1)
+
         return len(turns)  # No Q&A found
     
     def is_question(self, text: str) -> bool:
