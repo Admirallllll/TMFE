@@ -321,6 +321,7 @@ def run_pipeline(
         print("="*70)
 
         from src.analysis.company_rankings import run_company_ranking_analysis
+        from src.analysis.industry_rankings import run_industry_analysis
         from src.analysis.ai_wordclouds import run_ai_wordclouds
 
         run_company_ranking_analysis(
@@ -328,6 +329,15 @@ def run_pipeline(
             figures_dir,
             start_year=2020,
             end_year=2025
+        )
+
+        run_industry_analysis(
+            doc_metrics_path=f"{features_dir}/document_metrics.parquet",
+            final_dataset_path=input_dataset,
+            output_dir=figures_dir,
+            start_year=2020,
+            end_year=2025,
+            top_n=100
         )
 
         wordcloud_sample = dev_sample * 50 if dev_mode else None
