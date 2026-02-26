@@ -187,16 +187,28 @@ def _pred_initiation_type(question_is_ai: bool, answer_is_ai: bool) -> str:
 
 
 def _build_merged_turns(speech_turns: List[dict], qa_turns: List[dict]) -> List[dict]:
+    """Build a single chronological turn list from speech + QA turns.
+
+    Uses a global absolute index so that speech turns always precede QA
+    turns, regardless of the section-relative ``turn_idx`` stored inside
+    each turn dict.
+    """
     merged: List[dict] = []
+    global_idx = 0
     for section_name, turns in [("speech", speech_turns), ("qa", qa_turns)]:
-        for idx, t in enumerate(turns):
+        for _local_idx, t in enumerate(turns):
             item = dict(t) if isinstance(t, dict) else {"text": str(t)}
-            item.setdefault("idx", item.get("turn_idx", idx))
+            # Overwrite idx with a globally unique, monotonically increasing
+            # value so that sort order = chronological order.
+            item["idx"] = global_idx
+            item["section_local_idx"] = _local_idx
             item.setdefault("speaker", item.get("speaker", ""))
             item.setdefault("text", item.get("text", ""))
             item["section"] = section_name
             merged.append(item)
-    return sorted(merged, key=lambda x: (int(x.get("idx", 0)), str(x.get("section", ""))))
+            global_idx += 1
+    # Already in correct order, but sort explicitly for safety.
+    return sorted(merged, key=lambda x: x["idx"])
 
 
 def export_full_call_context_sidecar(

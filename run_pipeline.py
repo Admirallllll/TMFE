@@ -57,7 +57,12 @@ def run_pipeline(
     seed: int = 42,
     ai_method: str = "topic",
     kw_workers: int | None = None,
-    metrics_workers: int | None = None
+    metrics_workers: int | None = None,
+    run_lasso: bool = True,
+    lasso_max_features: int = 5000,
+    lasso_ngram_max: int = 2,
+    lasso_cv: int = 5,
+    lasso_skip_cv_pred: bool = False,
 ):
     """
     Run the full pipeline.
@@ -285,10 +290,34 @@ def run_pipeline(
         )
 
         # =========================================================================
-        # Stage 10: Additional Visualizations (Rankings + Wordclouds)
+        # Stage 10: Lasso Text Feature Analysis (Volcano + Coefficients)
+        # =========================================================================
+        if run_lasso:
+            print("\n" + "="*70)
+            print("STAGE 10: Lasso Text Feature Analysis")
+            print("="*70)
+
+            from src.analysis.lasso_text_features import run_lasso_text_analysis
+
+            lasso_out_dir = os.path.join(figures_dir, "lasso")
+            run_lasso_text_analysis(
+                sentences_path=f"{features_dir}/sentences_with_keywords.parquet",
+                doc_metrics_path=f"{features_dir}/document_metrics.parquet",
+                initiation_scores_path=f"{features_dir}/initiation_scores.parquet",
+                output_dir=lasso_out_dir,
+                max_features=lasso_max_features,
+                ngram_range=(1, lasso_ngram_max),
+                cv=lasso_cv,
+                compute_cv_predictions=not lasso_skip_cv_pred,
+            )
+        else:
+            print("\n[Skipping Lasso text feature analysis: run_lasso=False]")
+
+        # =========================================================================
+        # Stage 11: Additional Visualizations (Rankings + Wordclouds)
         # =========================================================================
         print("\n" + "="*70)
-        print("STAGE 10: Additional Visualizations")
+        print("STAGE 11: Additional Visualizations")
         print("="*70)
 
         from src.analysis.company_rankings import run_company_ranking_analysis
@@ -343,6 +372,11 @@ def run_pipeline(
             "ai_method": ai_method,
             "kw_workers": kw_workers,
             "metrics_workers": metrics_workers,
+            "run_lasso": run_lasso,
+            "lasso_max_features": lasso_max_features if run_lasso else None,
+            "lasso_ngram_max": lasso_ngram_max if run_lasso else None,
+            "lasso_cv": lasso_cv if run_lasso else None,
+            "lasso_skip_cv_pred": lasso_skip_cv_pred if run_lasso else None,
             "git_head": get_git_head(),
             "log_path": log_path,
             "inputs": {
@@ -393,6 +427,16 @@ if __name__ == "__main__":
                        help="Keyword detection workers (None = auto)")
     parser.add_argument("--metrics-workers", type=int, default=None,
                        help="AI intensity metrics workers (None = auto)")
+    parser.add_argument("--skip-lasso", action="store_true",
+                       help="Skip Lasso text-feature analysis stage (volcano/coefficient plots)")
+    parser.add_argument("--lasso-max-features", type=int, default=5000,
+                       help="Max TF-IDF features for Lasso text analysis")
+    parser.add_argument("--lasso-ngram-max", type=int, default=2,
+                       help="Max n-gram size for Lasso text analysis (min fixed at 1)")
+    parser.add_argument("--lasso-cv", type=int, default=5,
+                       help="Cross-validation folds for LassoCV")
+    parser.add_argument("--lasso-skip-cv-pred", action="store_true",
+                       help="Skip outer CV predictions/Kendall Tau scatter in Lasso stage for faster runs")
     
     args = parser.parse_args()
     
@@ -405,5 +449,10 @@ if __name__ == "__main__":
         seed=args.seed,
         ai_method=args.ai_method,
         kw_workers=args.kw_workers,
-        metrics_workers=args.metrics_workers
+        metrics_workers=args.metrics_workers,
+        run_lasso=not args.skip_lasso,
+        lasso_max_features=args.lasso_max_features,
+        lasso_ngram_max=args.lasso_ngram_max,
+        lasso_cv=args.lasso_cv,
+        lasso_skip_cv_pred=args.lasso_skip_cv_pred,
     )

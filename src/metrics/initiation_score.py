@@ -36,17 +36,29 @@ def extract_qa_exchanges(
     kw_pred_col: str = 'kw_is_ai'
 ) -> List[QAExchange]:
     """
-    Extract Q&A exchanges from sentence data.
-    
-    An exchange is a question followed by answer(s).
-    
+    Extract Q&A exchanges from sentence data using Macro-Question /
+    Macro-Answer fusion.
+
+    An exchange is one or more consecutive analyst turns (Macro-Question)
+    followed by one or more consecutive management/unknown turns
+    (Macro-Answer).  Operator turns act as explicit exchange boundaries
+    (they introduce the next analyst).
+
+    Consecutive same-role merging rules:
+      - Multiple analyst turns in a row (follow-up questions, clarifications)
+        are fused into a single Macro-Question.
+      - Multiple management/unknown turns in a row (CEO→CFO relay answers)
+        are fused into a single Macro-Answer.
+      - An operator turn always ends the current exchange and starts a new
+        boundary context.
+
     Args:
         sentences_df: Sentence-level data
-        
+
     Returns:
         List of QAExchange objects
     """
-    exchanges = []
+    exchanges: List[QAExchange] = []
 
     # Filter to Q&A section only
     qa_df = sentences_df[sentences_df[section_col] == 'qa'].copy()
@@ -87,46 +99,86 @@ def extract_qa_exchanges(
         turns_df['speaker'] = ''
     turns_df['role'] = turns_df['role'].fillna('unknown')
 
-    # Match questions with answers per document
+    # ------------------------------------------------------------------
+    # Macro-Question / Macro-Answer pairing per document
+    # ------------------------------------------------------------------
     n_docs = turns_df[doc_id_col].nunique()
     doc_groups = turns_df.groupby(doc_id_col, sort=False)
     for doc_id, doc_turns in tqdm(doc_groups, total=n_docs, desc="Q&A exchanges"):
         turns = doc_turns.sort_values(turn_idx_col).to_dict('records')
 
+        # --- Phase 1: build run-length-encoded segments ---
+        # Each segment is a group of consecutive turns with the same
+        # effective role: 'analyst', 'management', or 'operator'.
+        # 'unknown' is treated as 'management' (most unknowns in Q&A
+        # are management speakers whose titles were not parsed).
+        segments: List[dict] = []  # {role, texts[], speakers[], is_ai_flags[]}
+        for turn in turns:
+            raw_role = turn['role']
+            # Normalise: unknown → management for pairing purposes
+            eff_role = 'management' if raw_role in ('management', 'unknown') else raw_role
+
+            if segments and segments[-1]['role'] == eff_role:
+                # Extend current segment
+                segments[-1]['texts'].append(turn['text'])
+                segments[-1]['speakers'].append(turn.get('speaker', ''))
+                segments[-1]['is_ai_flags'].append(turn['is_ai'])
+            else:
+                # New segment
+                segments.append({
+                    'role': eff_role,
+                    'texts': [turn['text']],
+                    'speakers': [turn.get('speaker', '')],
+                    'is_ai_flags': [turn['is_ai']],
+                })
+
+        # --- Phase 2: pair adjacent analyst→management segments ---
         exchange_idx = 0
         i = 0
-        while i < len(turns):
-            turn = turns[i]
+        while i < len(segments):
+            seg = segments[i]
 
-            # Look for analyst turn (question)
-            if turn['role'] == 'analyst':
-                question = turn
+            # Skip operator segments (they are boundaries, not content)
+            if seg['role'] == 'operator':
+                i += 1
+                continue
 
-                # Find following management answer(s)
-                answers = []
+            if seg['role'] == 'analyst':
+                # Macro-Question: this entire analyst segment
+                macro_q_text = ' '.join(seg['texts'])
+                macro_q_speakers = seg['speakers']
+                macro_q_is_ai = any(seg['is_ai_flags'])
+
+                # Look ahead for Macro-Answer
                 j = i + 1
-                while j < len(turns) and turns[j]['role'] in ['management', 'unknown']:
-                    answers.append(turns[j])
+                # Skip any intervening operator segment (operator may
+                # appear between question and answer in some transcripts)
+                while j < len(segments) and segments[j]['role'] == 'operator':
                     j += 1
 
-                if answers:
-                    # Combine answer texts
-                    answer_text = ' '.join([a['text'] for a in answers])
-                    answer_is_ai = any(a['is_ai'] for a in answers)
+                if j < len(segments) and segments[j]['role'] == 'management':
+                    ans_seg = segments[j]
+                    macro_a_text = ' '.join(ans_seg['texts'])
+                    macro_a_speakers = ans_seg['speakers']
+                    macro_a_is_ai = any(ans_seg['is_ai_flags'])
+
                     exchanges.append(QAExchange(
                         doc_id=doc_id,
                         exchange_idx=exchange_idx,
-                        question_text=question['text'],
-                        answer_text=answer_text,
-                        questioner=question.get('speaker', ''),
-                        answerer=answers[0].get('speaker', ''),
-                        question_is_ai=question['is_ai'],
-                        answer_is_ai=answer_is_ai
+                        question_text=macro_q_text,
+                        answer_text=macro_a_text,
+                        questioner=macro_q_speakers[0],
+                        answerer=macro_a_speakers[0],
+                        question_is_ai=macro_q_is_ai,
+                        answer_is_ai=macro_a_is_ai,
                     ))
                     exchange_idx += 1
-                    i = j
+                    i = j + 1
                     continue
 
+            # If we reach here the segment is management without a
+            # preceding analyst question (e.g. management opens Q&A
+            # with a preamble).  Skip it.
             i += 1
 
     return exchanges

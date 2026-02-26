@@ -82,7 +82,8 @@ def prepare_regression_data(
     
     # Merge initiation and doc_metrics
     # Include initiation sub-columns that carry linguistic/sociolinguistic signal
-    init_cols = ['doc_id']
+    # Preserve parsed merge keys for the downstream WRDS merge.
+    init_cols = ['doc_id', 'ticker', 'year', 'quarter']
     for col in ['ai_initiation_score', 'total_ai_exchanges', 'analyst_initiated_ratio',
                 'management_pivot_ratio', 'analyst_only_count', 'analyst_initiated_count',
                 'management_pivot_count']:
