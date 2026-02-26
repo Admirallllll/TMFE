@@ -273,6 +273,11 @@ def export_ai_sentence_audit(
     df["kw_is_ai"] = df["kw_is_ai"].fillna(False).astype(bool)
     df["section"] = df["section"].fillna("NA").astype(str)
     df["text"] = df["text"].fillna("").astype(str)
+    # Exported rows only expose doc_id/section/text for annotators. If the source
+    # parquet contains multiple identical sentence texts within the same doc/section
+    # (common for short phrases like "Thank you."), row-level sampling can pick
+    # duplicates that become indistinguishable in the annotation batch.
+    df = df.drop_duplicates(subset=["doc_id", "section", "text"], keep="first").copy()
 
     pos = _sample_stratified(df[df["kw_is_ai"]], n=pos_n, by="section", seed=seed, preferred_order=["speech", "qa"])
     neg = _sample_stratified(df[~df["kw_is_ai"]], n=neg_n, by="section", seed=seed + 1, preferred_order=["speech", "qa"])

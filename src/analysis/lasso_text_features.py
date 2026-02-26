@@ -206,7 +206,7 @@ def fit_lasso_ngram(
     print(f"  Training LassoCV on {X_scaled.shape[0]} samples x {X_scaled.shape[1]} features...")
     # n_jobs=-1 sometimes causes deadlocks with huge matrices on Macs.
     # Set n_jobs=2 or 1 if it hangs. verbose=1 shows progress.
-    lasso = LassoCV(cv=cv, random_state=random_state, max_iter=2000, n_jobs=-1, verbose=1)
+    lasso = LassoCV(cv=cv, random_state=random_state, max_iter=2000, n_jobs=2, verbose=1)
     lasso.fit(X_scaled, y)
 
     alpha = lasso.alpha_
