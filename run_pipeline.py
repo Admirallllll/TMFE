@@ -14,6 +14,7 @@ Stages (ai_method dependent):
 8. Run analyses (time series, quadrants, regression)
 9. Benchmark comparison
 10. Additional visualizations (company rankings, wordclouds)
+11. Research-grade report stage (metadata linkage, FE, model comparison, interpretability)
 """
 
 import os
@@ -70,6 +71,10 @@ def run_pipeline(
     benchmark_cv_folds: int = 5,
     benchmark_text_model: str = "ratios",
     benchmark_text_section: str = "qa",
+    run_research_report: bool = True,
+    report_output_dir: str | None = None,
+    research_target: str = "y_next_mktcap_growth",
+    research_test_quarters: int = 4,
 ):
     """
     Run the full pipeline.
@@ -130,6 +135,7 @@ def run_pipeline(
         # Create output directories
         features_dir = f"{output_dir}/features"
         figures_dir = f"{output_dir}/figures"
+        report_dir = report_output_dir or os.path.join(output_dir, "report")
 
         for d in [features_dir, figures_dir]:
             os.makedirs(d, exist_ok=True)
@@ -157,6 +163,9 @@ def run_pipeline(
         dup_keys = key_df[["ticker", "year", "quarter"]].duplicated().sum()
         if int(dup_keys) != 0:
             raise RuntimeError(f"Input dataset has duplicate (ticker, year, quarter) keys: {int(dup_keys)} duplicate rows")
+
+        benchmark_outputs = None
+        research_outputs = None
 
         # =========================================================================
         # Stage 1: Parse Transcripts
@@ -321,7 +330,6 @@ def run_pipeline(
         # =========================================================================
         # Stage 11: Benchmark Comparison (Baseline vs Models)
         # =========================================================================
-        benchmark_outputs = None
         if run_benchmark:
             print("\n" + "="*70)
             print("STAGE 11: Benchmark Comparison")
@@ -404,6 +412,30 @@ def run_pipeline(
         )
 
         # =========================================================================
+        # Stage 14: Research-Grade Report (Econometric + Model + Cases)
+        # =========================================================================
+        if run_research_report:
+            print("\n" + "=" * 70)
+            print("STAGE 14: Research-Grade Report")
+            print("=" * 70)
+
+            from src.analysis.research_report import run_research_report as run_research_stage
+
+            research_outputs = run_research_stage(
+                sentences_with_keywords_path=f"{features_dir}/sentences_with_keywords.parquet",
+                document_metrics_path=f"{features_dir}/document_metrics.parquet",
+                initiation_scores_path=f"{features_dir}/initiation_scores.parquet",
+                parsed_transcripts_path=f"{features_dir}/parsed_transcripts.parquet",
+                final_dataset_path=input_dataset,
+                wrds_path=wrds_path,
+                output_dir=report_dir,
+                model_target=research_target,
+                test_quarters=research_test_quarters,
+            )
+        else:
+            print("\n[Skipping research-grade report stage: run_research_report=False]")
+
+        # =========================================================================
         # Summary
         # =========================================================================
         end_time = datetime.now()
@@ -438,9 +470,13 @@ def run_pipeline(
             "run_lasso": run_lasso,
             "run_benchmark": run_benchmark,
             "run_eda_foundation": run_eda_foundation,
+            "run_research_report": run_research_report,
             "benchmark_cv_folds": benchmark_cv_folds if run_benchmark else None,
             "benchmark_text_model": benchmark_text_model if run_benchmark else None,
             "benchmark_text_section": benchmark_text_section if run_benchmark else None,
+            "research_target": research_target if run_research_report else None,
+            "research_test_quarters": research_test_quarters if run_research_report else None,
+            "report_output_dir": report_dir if run_research_report else None,
             "lasso_max_features": lasso_max_features if run_lasso else None,
             "lasso_ngram_max": lasso_ngram_max if run_lasso else None,
             "lasso_cv": lasso_cv if run_lasso else None,
@@ -460,6 +496,7 @@ def run_pipeline(
                 "figures_dir": figures_dir,
                 "eda_foundation_outputs": eda_foundation_outputs,
                 "benchmark_outputs": benchmark_outputs,
+                "research_outputs": research_outputs,
             },
         }
 
@@ -517,6 +554,14 @@ if __name__ == "__main__":
                        help="Benchmark text model mode: ratio features or raw TF-IDF text")
     parser.add_argument("--benchmark-text-section", default="qa", choices=["qa", "speech", "all"],
                        help="Section to use for raw-text benchmark mode")
+    parser.add_argument("--skip-research-report", action="store_true",
+                       help="Skip research-grade report stage")
+    parser.add_argument("--report-output-dir", default=None,
+                       help="Output directory for research report stage (default: <output-dir>/report)")
+    parser.add_argument("--research-target", default="y_next_mktcap_growth",
+                       help="Economic target variable for research model comparison/lasso stage")
+    parser.add_argument("--research-test-quarters", type=int, default=4,
+                       help="Number of last quarters reserved for time-split test in research stage")
     
     args = parser.parse_args()
     
@@ -540,4 +585,8 @@ if __name__ == "__main__":
         benchmark_cv_folds=args.benchmark_cv_folds,
         benchmark_text_model=args.benchmark_text_model,
         benchmark_text_section=args.benchmark_text_section,
+        run_research_report=not args.skip_research_report,
+        report_output_dir=args.report_output_dir,
+        research_target=args.research_target,
+        research_test_quarters=args.research_test_quarters,
     )
