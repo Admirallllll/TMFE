@@ -150,8 +150,9 @@ def prepare_wrds_features(wrds_path: str) -> pd.DataFrame:
     if "datadate" in wrds.columns:
         wrds["datadate"] = pd.to_datetime(wrds["datadate"], errors="coerce")
 
-    if "datacqtr" in wrds.columns:
-        dq = wrds["datacqtr"].astype(str)
+    qtr_col = "datacqtr" if "datacqtr" in wrds.columns else ("datafqtr" if "datafqtr" in wrds.columns else None)
+    if qtr_col:
+        dq = wrds[qtr_col].astype(str)
         wrds["year"] = pd.to_numeric(dq.str[:4], errors="coerce")
         wrds["quarter"] = pd.to_numeric(dq.str[-1], errors="coerce")
 

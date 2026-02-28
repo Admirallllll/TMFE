@@ -265,7 +265,7 @@ def run_model_comparison(
 
     finance_features = [c for c in ["log_mktcap", "rd_intensity", "eps_positive", "ln_price", "eps_growth_yoy"] if c in work.columns]
     text_features = [c for c in ["overall_kw_ai_ratio", "qa_kw_ai_ratio", "speech_kw_ai_ratio", "ai_initiation_score", "analyst_ai_share", "management_ai_share", "first_ai_turn_position"] if c in work.columns]
-    cat_cols = ["gsector", "year_quarter"]
+    cat_cols = ["gsector"] # Removed year_quarter because it'll entirely be unseen OOS categories
 
     model_defs = {
         "Finance-only": finance_features + cat_cols,
@@ -304,9 +304,9 @@ def run_model_comparison(
 
     # Speech vs Q&A vs Analyst block comparison (text-only blocks).
     block_defs = {
-        "Speech-block": ["speech_kw_ai_ratio", "gsector", "year_quarter"],
-        "Q&A-block": ["qa_kw_ai_ratio", "gsector", "year_quarter"],
-        "Analyst-block": ["analyst_ai_share", "management_ai_share", "first_ai_turn_position", "gsector", "year_quarter"],
+        "Speech-block": ["speech_kw_ai_ratio", "gsector"],
+        "Q&A-block": ["qa_kw_ai_ratio", "gsector"],
+        "Analyst-block": ["analyst_ai_share", "management_ai_share", "first_ai_turn_position", "gsector"],
     }
 
     for name, feats in block_defs.items():
@@ -342,6 +342,8 @@ def run_model_comparison(
 
 def _aggregate_doc_text(sentences_df: pd.DataFrame, section: Optional[str] = None) -> pd.DataFrame:
     s = sentences_df[["doc_id", "text"] + (["section"] if "section" in sentences_df.columns else [])].copy()
+    if "kw_is_ai" in sentences_df.columns:
+        s.loc[~sentences_df["kw_is_ai"].fillna(False).astype(bool), "text"] = ""
     if section and "section" in s.columns:
         s = s[s["section"] == section].copy()
     s["text"] = s["text"].fillna("").astype(str)
@@ -439,6 +441,7 @@ def run_interpretable_lasso(
         min_df=min_df,
         max_df=0.9,
         sublinear_tf=True,
+        stop_words="english",
     )
 
     train_texts = train["text"].fillna("").astype(str).tolist()
@@ -452,6 +455,7 @@ def run_interpretable_lasso(
             min_df=max(5, min_df // 4),
             max_df=0.95,
             sublinear_tf=True,
+            stop_words="english",
         )
         X_text_train = vec.fit_transform(train_texts)
     X_text_test = vec.transform(test_texts)
@@ -478,9 +482,9 @@ def run_interpretable_lasso(
     y_train = train[target].to_numpy(dtype=float)
     y_test = test[target].to_numpy(dtype=float)
 
-    # Lightweight time-aware alpha tuning (faster than full ElasticNetCV on sparse text).
+    # Lightweight time-aware alpha tuning
     tscv = TimeSeriesSplit(n_splits=2)
-    alpha_grid = np.logspace(-3, -1, 3)
+    alpha_grid = np.logspace(-5, -2, 4) # [1e-5, 1e-4, 1e-3, 1e-2] to avoid over-shrinking TFIDF
     l1_ratio = 0.9
     best_alpha = float(alpha_grid[0])
     best_mae = float("inf")
@@ -499,13 +503,13 @@ def run_interpretable_lasso(
     model = ElasticNet(alpha=best_alpha, l1_ratio=l1_ratio, max_iter=6000)
     model.fit(X_train, y_train)
     # Ensure interpretability output is non-degenerate when CV picks an overly sparse alpha.
-    if np.count_nonzero(model.coef_) == 0 and X_train.shape[1] > len(finance_cols):
+    if np.count_nonzero(model.coef_[len(finance_cols):]) == 0 and X_train.shape[1] > len(finance_cols):
         alpha_try = best_alpha
         for _ in range(5):
             alpha_try = alpha_try * 0.3
             relaxed = ElasticNet(alpha=alpha_try, l1_ratio=l1_ratio, max_iter=6000)
             relaxed.fit(X_train, y_train)
-            if np.count_nonzero(relaxed.coef_) > 0:
+            if np.count_nonzero(relaxed.coef_[len(finance_cols):]) > 0:
                 model = relaxed
                 best_alpha = alpha_try
                 break
@@ -570,6 +574,17 @@ def run_interpretable_lasso(
 
             stable_model = ElasticNet(alpha=best_alpha, l1_ratio=l1_ratio, max_iter=6000)
             stable_model.fit(X_sub, y_sub)
+            
+            sub_alpha = best_alpha
+            if np.count_nonzero(stable_model.coef_[len(finance_cols):]) == 0:
+                for _ in range(4):
+                    sub_alpha = sub_alpha * 0.3
+                    rel = ElasticNet(alpha=sub_alpha, l1_ratio=l1_ratio, max_iter=6000)
+                    rel.fit(X_sub, y_sub)
+                    if np.count_nonzero(rel.coef_[len(finance_cols):]) > 0:
+                        stable_model = rel
+                        break
+            
             windows.append(stable_model.coef_)
 
     if windows:

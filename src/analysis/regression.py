@@ -120,9 +120,10 @@ def prepare_regression_data(
     if "datadate" in wrds.columns:
         wrds["datadate"] = pd.to_datetime(wrds["datadate"], errors="coerce")
 
-    if "datacqtr" in wrds.columns:
-        wrds["wrds_year"] = wrds["datacqtr"].astype(str).str[:4].astype(int)
-        wrds["wrds_quarter"] = wrds["datacqtr"].astype(str).str[-1].astype(int)
+    qtr_col = "datacqtr" if "datacqtr" in wrds.columns else ("datafqtr" if "datafqtr" in wrds.columns else None)
+    if qtr_col:
+        wrds["wrds_year"] = wrds[qtr_col].astype(str).str[:4].astype(int)
+        wrds["wrds_quarter"] = wrds[qtr_col].astype(str).str[-1].astype(int)
 
     wrds["rd_intensity"] = wrds["xrdq"] / wrds["mkvaltq"]
     wrds["rd_intensity"] = wrds["rd_intensity"].replace([np.inf, -np.inf], np.nan)
@@ -496,9 +497,9 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Regression analysis")
-    parser.add_argument("--initiation", default="outputs/features/initiation_scores.parquet")
-    parser.add_argument("--doc-metrics", default="outputs/features/document_metrics.parquet")
-    parser.add_argument("--wrds", default="Sp500_meta_data.csv")
+    parser.add_argument("--scores", default="outputs/features/initiation_scores.parquet", help="Initiation scores file")
+    parser.add_argument("--metrics", default="outputs/features/document_metrics.parquet", help="Document metrics file")
+    parser.add_argument("--wrds", default="data/wrds.csv")
     parser.add_argument("--output-dir", default="outputs/figures")
     parser.add_argument("--oos-group-col", default="ticker")
     parser.add_argument("--oos-cv-folds", type=int, default=5)

@@ -213,11 +213,11 @@ def run_time_series_analysis(
 if __name__ == "__main__":
     import argparse
     
-    parser = argparse.ArgumentParser(description="Time series analysis")
+    parser = argparse.ArgumentParser(description="Analyze AI topic intensity over time")
     parser.add_argument("--metrics", default="outputs/features/document_metrics.parquet")
-    parser.add_argument("--dataset", default="final_dataset.parquet")
-    parser.add_argument("--output-dir", default="outputs/figures")
+    parser.add_argument("--dataset", default="data/final_dataset.parquet")
+    parser.add_argument("--output", default="outputs/figures")
     
     args = parser.parse_args()
     
-    run_time_series_analysis(args.metrics, args.dataset, args.output_dir)
+    run_time_series_analysis(args.metrics, args.dataset, args.output)

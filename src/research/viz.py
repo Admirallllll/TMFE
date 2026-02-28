@@ -25,14 +25,17 @@ def plot_dataset_overview(df: pd.DataFrame, output_path: str) -> Dict[str, str]:
     )
     if len(sector_counts):
         axes[0, 0].barh(sector_counts.index.astype(str), sector_counts.values, color="#3b7ddd")
+        sector_counts.to_frame("count").to_csv(output_path.replace(".png", "_sector_counts.csv"), index_label="sector")
     axes[0, 0].set_title("Sample by GICS Sector (Top 10)")
 
     if "total_sentences" in df.columns:
         sns.histplot(df["total_sentences"], bins=40, ax=axes[0, 1], color="#ef8a62")
+        df[["total_sentences"]].dropna().to_csv(output_path.replace(".png", "_total_sentences.csv"), index=False)
     axes[0, 1].set_title("Call Length Distribution (Sentences)")
 
     if "overall_kw_ai_ratio" in df.columns:
         sns.histplot(df["overall_kw_ai_ratio"], bins=50, ax=axes[1, 0], color="#4daf4a")
+        df[["overall_kw_ai_ratio"]].dropna().to_csv(output_path.replace(".png", "_ai_intensity_dist.csv"), index=False)
     axes[1, 0].set_title("Overall AI Intensity Distribution")
 
     zero_metrics = {
@@ -43,6 +46,7 @@ def plot_dataset_overview(df: pd.DataFrame, output_path: str) -> Dict[str, str]:
     }
     zm = pd.Series(zero_metrics).dropna()
     axes[1, 1].bar(zm.index, zm.values, color="#7b3294")
+    zm.to_frame("ratio").to_csv(output_path.replace(".png", "_zero_metrics.csv"), index_label="metric")
     axes[1, 1].set_ylim(0, 1)
     axes[1, 1].tick_params(axis="x", rotation=20)
     axes[1, 1].set_title("Zero-Inflation Diagnostics")
@@ -117,6 +121,7 @@ def plot_structural_metadata(df: pd.DataFrame, output_path: str) -> Dict[str, st
     y1 = "overall_kw_ai_ratio"
     if {x1, y1}.issubset(df.columns):
         sns.regplot(data=df, x=x1, y=y1, scatter_kws={"s": 10, "alpha": 0.2}, line_kws={"color": "red"}, ax=axes[0])
+        df[[x1, y1]].dropna().to_csv(output_path.replace(".png", "_qa_share_scatter.csv"), index=False)
     axes[0].set_title("Q&A Share vs AI Intensity")
 
     x2 = "analyst_ai_share"
@@ -127,6 +132,7 @@ def plot_structural_metadata(df: pd.DataFrame, output_path: str) -> Dict[str, st
             temp["bin"] = pd.qcut(temp[x2].rank(method="first"), q=10, labels=False)
             agg = temp.groupby("bin", as_index=False)[[x2, y2]].mean()
             axes[1].plot(agg[x2], agg[y2], marker="o")
+            agg.to_csv(output_path.replace(".png", "_analyst_ai_binned.csv"), index=False)
     axes[1].set_title("Analyst AI Share vs Next Mktcap Growth (binned)")
 
     fig.tight_layout()
@@ -153,11 +159,13 @@ def plot_time_series(df: pd.DataFrame, output_path: str) -> Dict[str, str]:
 
     fig, ax = plt.subplots(figsize=(12, 5))
     ax.plot(ts["year_quarter"], ts["overall_kw_ai_ratio"], marker="o", label="All firms")
+    ts.to_csv(output_path.replace(".png", "_all_firms.csv"), index=False)
 
     if {"log_mktcap", "quarter_index"}.issubset(df.columns):
         tmp = df.dropna(subset=["log_mktcap", "overall_kw_ai_ratio", "year_quarter", "quarter_index"]).copy()
         tmp["size_group"] = np.where(tmp["log_mktcap"] >= tmp["log_mktcap"].median(), "Large", "Small")
         grp = tmp.groupby(["year_quarter", "size_group"], as_index=False)["overall_kw_ai_ratio"].mean()
+        grp.to_csv(output_path.replace(".png", "_size_grouped.csv"), index=False)
         for g, sub in grp.groupby("size_group"):
             ax.plot(sub["year_quarter"], sub["overall_kw_ai_ratio"], marker=".", alpha=0.8, label=f"{g} cap")
 
@@ -238,6 +246,7 @@ def plot_model_comparison(metrics_df: pd.DataFrame, output_path: str) -> Dict[st
     _ensure_parent(output_path)
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
     plot = metrics_df.copy().sort_values("r2_test", ascending=False)
+    plot.to_csv(output_path.replace(".png", "_data.csv"), index=False)
 
     axes[0].barh(plot["model"], plot["r2_test"], color="#1b9e77")
     axes[0].invert_yaxis()
@@ -277,6 +286,7 @@ def plot_lasso_outputs(term_df: pd.DataFrame, stability_df: pd.DataFrame, output
         fig.tight_layout()
         coef_path = os.path.join(output_dir, "lasso_coef_bar.png")
         fig.savefig(coef_path, dpi=180, bbox_inches="tight")
+        top.to_csv(coef_path.replace(".png", "_data.csv"), index=False)
         plt.close(fig)
 
         notes.append(
@@ -298,6 +308,7 @@ def plot_lasso_outputs(term_df: pd.DataFrame, stability_df: pd.DataFrame, output
         fig.tight_layout()
         vol_path = os.path.join(output_dir, "lasso_volcano.png")
         fig.savefig(vol_path, dpi=180, bbox_inches="tight")
+        text_terms.to_csv(vol_path.replace(".png", "_data.csv"), index=False)
         plt.close(fig)
 
         notes.append(
@@ -322,6 +333,7 @@ def plot_lasso_outputs(term_df: pd.DataFrame, stability_df: pd.DataFrame, output
         fig.tight_layout()
         stab_path = os.path.join(output_dir, "lasso_stability.png")
         fig.savefig(stab_path, dpi=180, bbox_inches="tight")
+        stab.to_csv(stab_path.replace(".png", "_data.csv"), index=False)
         plt.close(fig)
 
         notes.append(

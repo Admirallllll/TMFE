@@ -30,7 +30,7 @@ from sklearn.metrics import (
     recall_score,
 )
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = PROJECT_ROOT / "data" / "human_annotation"
 FIG_DIR = PROJECT_ROOT / "outputs" / "figures" / "validation"
 
@@ -61,6 +61,36 @@ def _require_columns(df: pd.DataFrame, required: Iterable[str], dataset_name: st
     if missing:
         missing_str = ", ".join(missing)
         raise KeyError(f"{dataset_name} is missing required columns: {missing_str}")
+
+import sys
+import datetime
+
+class Tee:
+    """Redirects stdout to both the original stdout and a log file."""
+    def __init__(self, log_dir: Path, base_name: str):
+        self.log_dir = log_dir
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.log_file = self.log_dir / f"{base_name}_{timestamp}.txt"
+        self.file = open(self.log_file, "w", encoding="utf-8")
+        self.stdout = sys.stdout
+        sys.stdout = self
+        print(f"Logging output to: {self.log_file}")
+
+    def __del__(self):
+        if hasattr(self, 'file'):
+            self.file.close()
+
+    def write(self, data):
+        self.file.write(data)
+        self.stdout.write(data)
+
+    def flush(self):
+        self.file.flush()
+        self.stdout.flush()
+
+    def _get_log_path(self):
+        return self.log_file
 
 
 def _normalize_text(series: pd.Series) -> pd.Series:
@@ -433,31 +463,36 @@ def print_agreement_table(agreement_df: pd.DataFrame) -> None:
 
 
 def main() -> None:
-    ai_df = _load_csv(AI_FILE)
-    role_df = _load_csv(ROLE_FILE)
-    boundary_df = _load_csv(BOUNDARY_FILE)
-    initiation_df = _load_csv(INITIATION_FILE)
+    log_dir = PROJECT_ROOT / "outputs" / "logs" / "inspect"
+    tee = Tee(log_dir, "manual_validation")
+    try:
+        ai_df = _load_csv(AI_FILE)
+        role_df = _load_csv(ROLE_FILE)
+        boundary_df = _load_csv(BOUNDARY_FILE)
+        initiation_df = _load_csv(INITIATION_FILE)
 
-    ai_metrics = compute_ai_keyword_metrics(ai_df)
-    role_metrics = compute_role_metrics(role_df)
-    boundary_metrics = compute_boundary_parser_metrics(boundary_df)
-    initiation_metrics = compute_initiation_metrics(initiation_df)
+        ai_metrics = compute_ai_keyword_metrics(ai_df)
+        role_metrics = compute_role_metrics(role_df)
+        boundary_metrics = compute_boundary_parser_metrics(boundary_df)
+        initiation_metrics = compute_initiation_metrics(initiation_df)
 
-    print_pipeline_summary(ai_metrics, role_metrics, boundary_metrics, initiation_metrics)
+        print_pipeline_summary(ai_metrics, role_metrics, boundary_metrics, initiation_metrics)
 
-    agreement_df = build_agreement_table(ai_df, role_df, boundary_df, initiation_df)
-    print_agreement_table(agreement_df)
+        agreement_df = build_agreement_table(ai_df, role_df, boundary_df, initiation_df)
+        print_agreement_table(agreement_df)
 
-    FIG_DIR.mkdir(parents=True, exist_ok=True)
-    initiation_cm_path = FIG_DIR / "initiation_confusion_matrix.png"
-    role_perf_path = FIG_DIR / "role_performance_bars.png"
+        FIG_DIR.mkdir(parents=True, exist_ok=True)
+        initiation_cm_path = FIG_DIR / "initiation_confusion_matrix.png"
+        role_perf_path = FIG_DIR / "role_performance_bars.png"
 
-    plot_initiation_confusion_matrix(initiation_df, initiation_cm_path)
-    plot_role_performance_bars(role_df, role_perf_path)
+        plot_initiation_confusion_matrix(initiation_df, initiation_cm_path)
+        plot_role_performance_bars(role_df, role_perf_path)
 
-    print("\n=== Figures Saved ===")
-    print(f"- {initiation_cm_path}")
-    print(f"- {role_perf_path}")
+        print("\n=== Figures Saved ===")
+        print(f"- {initiation_cm_path}")
+        print(f"- {role_perf_path}")
+    finally:
+        sys.stdout = tee.stdout
 
 
 if __name__ == "__main__":

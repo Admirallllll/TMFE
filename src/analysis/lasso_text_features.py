@@ -1,37 +1,30 @@
 """
-Lasso Text Features Module
+Stage 12 rewrite: AI sentence sentiment + forward R&D prediction.
 
-Uses N-gram (TF-IDF) features from earnings call text to predict AI-related
-scores via Lasso regression, then produces:
-  1. Coefficient plot (signed bar chart)
-  2. Volcano Plot (x = coefficient, y = log document frequency) — the
-     professor's signature visualization for identifying key linguistic drivers.
+This module now focuses on targets that management can influence directly:
+- Continuous: y_next_rd_intensity_change
+- Binary:     rd_increased_next_quarter
 
-Usage (standalone):
-    python -m src.analysis.lasso_text_features \
-        --sentences outputs/features/sentences_with_keywords.parquet \
-        --metrics  outputs/features/document_metrics.parquet \
-        --output-dir outputs/figures
-
-Usage (as a library):
-    from src.analysis.lasso_text_features import run_lasso_text_analysis
-    results = run_lasso_text_analysis(sentences_path, doc_metrics_path)
+Text features are built from AI-tagged sentences and combined with simple
+Loughran-McDonald style positive/negative tone ratios.
 """
 
 from __future__ import annotations
 
 import os
-from typing import Dict, List, Optional, Tuple
+import re
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from scipy import sparse
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.linear_model import Lasso, LassoCV
-from sklearn.model_selection import KFold, cross_val_predict
-from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import Lasso, LogisticRegression
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, roc_auc_score, roc_curve
+from sklearn.model_selection import KFold, StratifiedKFold
 from sklearn.preprocessing import StandardScaler
-from scipy.stats import kendalltau
 
 try:
     from src.utils.visual_style import (
@@ -51,168 +44,215 @@ except Exception:  # pragma: no cover
         "grid": "#2A2A2A",
         "blue": "#4EA1FF",
     }
+
     def apply_spotify_theme():
         return None
+
     def style_axes(ax, **kwargs):
         return ax
+
     def style_legend(ax):
         return ax.get_legend()
+
     def save_figure(fig, output_path: str, dpi: int = 150):
         fig.savefig(output_path, dpi=dpi, bbox_inches="tight")
         plt.close(fig)
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+POSITIVE_WORDS = {
+    "benefit",
+    "confidence",
+    "efficient",
+    "efficiency",
+    "gain",
+    "growth",
+    "improve",
+    "innovation",
+    "lead",
+    "margin",
+    "opportunity",
+    "optimize",
+    "progress",
+    "strong",
+    "upgrade",
+    "value",
+}
+NEGATIVE_WORDS = {
+    "challenge",
+    "concern",
+    "decline",
+    "difficult",
+    "headwind",
+    "loss",
+    "pressure",
+    "risk",
+    "slowdown",
+    "uncertain",
+    "uncertainty",
+    "volatile",
+    "weak",
+    "worse",
+}
+TOKEN_RE = re.compile(r"[a-zA-Z]+")
 
-DEFAULT_TFIDF_MIN_DF = 0.01
-DEFAULT_TFIDF_MAX_DF = 0.80
-DEFAULT_LASSO_INNER_CV = 3
-DEFAULT_LASSO_N_ALPHAS = 50
-DEFAULT_LASSO_MAX_ITER = 1000
-DEFAULT_LASSO_TOL = 1e-3
-DEFAULT_MODEL_N_JOBS = -1
+
+def _parse_doc_id(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    if "doc_id" not in out.columns:
+        return out
+    parts = out["doc_id"].astype(str).str.rsplit("_", n=1)
+    yq = parts.str[-1]
+    if "ticker" not in out.columns:
+        out["ticker"] = parts.str[0]
+    if "year" not in out.columns:
+        out["year"] = pd.to_numeric(yq.str.extract(r"^(\d{4})Q(\d)$")[0], errors="coerce")
+    if "quarter" not in out.columns:
+        out["quarter"] = pd.to_numeric(yq.str.extract(r"^(\d{4})Q(\d)$")[1], errors="coerce")
+    return out
 
 
-def _build_lasso_text_pipeline(
-    inner_cv: int,
-    max_features: int,
-    ngram_range: Tuple[int, int],
-    random_state: int,
-    tfidf_min_df: float = DEFAULT_TFIDF_MIN_DF,
-    tfidf_max_df: float = DEFAULT_TFIDF_MAX_DF,
-    lasso_n_alphas: int = DEFAULT_LASSO_N_ALPHAS,
-    lasso_max_iter: int = DEFAULT_LASSO_MAX_ITER,
-    lasso_tol: float = DEFAULT_LASSO_TOL,
-    lasso_n_jobs: int = DEFAULT_MODEL_N_JOBS,
-) -> Pipeline:
-    """Build a sparse-safe TF-IDF -> scaler -> LassoCV pipeline."""
-    return Pipeline(
-        steps=[
-            (
-                "tfidf",
-                TfidfVectorizer(
-                    max_features=max_features,
-                    ngram_range=ngram_range,
-                    sublinear_tf=True,
-                    min_df=tfidf_min_df,
-                    max_df=tfidf_max_df,
-                ),
-            ),
-            # Preserve sparsity; centering would densify the TF-IDF matrix and explode RAM.
-            ("scaler", StandardScaler(with_mean=False)),
-            (
-                "lasso",
-                LassoCV(
-                    cv=inner_cv,
-                    random_state=random_state,
-                    n_alphas=lasso_n_alphas,
-                    max_iter=lasso_max_iter,
-                    tol=lasso_tol,
-                    n_jobs=lasso_n_jobs,
-                    verbose=0,
-                ),
-            ),
-        ]
+def _build_doc_corpus(sentences_df: pd.DataFrame, section: Optional[str] = None) -> pd.DataFrame:
+    cols = ["doc_id", "text"] + (["section"] if "section" in sentences_df.columns else [])
+    s = sentences_df[cols].copy()
+
+    if "kw_is_ai" in sentences_df.columns:
+        s = s[sentences_df["kw_is_ai"].fillna(False).astype(bool)].copy()
+
+    if section and "section" in s.columns:
+        sec = s[s["section"] == section].copy()
+        if len(sec) > 0:
+            s = sec
+
+    s["text"] = s["text"].fillna("").astype(str)
+    return s.groupby("doc_id", sort=False)["text"].agg(" ".join).reset_index()
+
+
+def compute_ai_sentiment_features(sentences_df: pd.DataFrame) -> pd.DataFrame:
+    """Compute positive/negative tone ratios only on AI-tagged sentences."""
+    if sentences_df is None or len(sentences_df) == 0:
+        return pd.DataFrame(
+            columns=[
+                "doc_id",
+                "ai_sentiment_positive_ratio",
+                "ai_sentiment_negative_ratio",
+                "ai_positive_count",
+                "ai_negative_count",
+                "ai_sentiment_token_count",
+            ]
+        )
+
+    s = sentences_df[["doc_id", "text"]].copy()
+    if "kw_is_ai" in sentences_df.columns:
+        s = s[sentences_df["kw_is_ai"].fillna(False).astype(bool)].copy()
+
+    s["text"] = s["text"].fillna("").astype(str)
+
+    rows: List[Dict[str, float]] = []
+    for doc_id, grp in s.groupby("doc_id", sort=False):
+        text = " ".join(grp["text"].tolist()).lower()
+        toks = TOKEN_RE.findall(text)
+        if not toks:
+            rows.append(
+                {
+                    "doc_id": doc_id,
+                    "ai_sentiment_positive_ratio": 0.0,
+                    "ai_sentiment_negative_ratio": 0.0,
+                    "ai_positive_count": 0,
+                    "ai_negative_count": 0,
+                    "ai_sentiment_token_count": 0,
+                }
+            )
+            continue
+
+        pos = sum(t in POSITIVE_WORDS for t in toks)
+        neg = sum(t in NEGATIVE_WORDS for t in toks)
+        denom = pos + neg
+        rows.append(
+            {
+                "doc_id": doc_id,
+                "ai_sentiment_positive_ratio": float(pos / denom) if denom > 0 else 0.0,
+                "ai_sentiment_negative_ratio": float(neg / denom) if denom > 0 else 0.0,
+                "ai_positive_count": int(pos),
+                "ai_negative_count": int(neg),
+                "ai_sentiment_token_count": int(len(toks)),
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+def _load_forward_rd_targets(doc_metrics_path: str, doc_metrics_df: pd.DataFrame) -> pd.DataFrame:
+    """Build forward R&D targets from regression dataset in the same feature directory."""
+    candidates = [
+        os.path.join(os.path.dirname(doc_metrics_path), "regression_dataset.parquet"),
+        os.path.join("outputs", "features", "regression_dataset.parquet"),
+    ]
+
+    src = None
+    for path in candidates:
+        if os.path.exists(path):
+            src = pd.read_parquet(path)
+            break
+
+    if src is None:
+        src = doc_metrics_df[["doc_id"]].copy()
+
+    src = _parse_doc_id(src)
+
+    if "rd_intensity" in src.columns and "y_next_rd_intensity_change" not in src.columns:
+        if {"ticker", "year", "quarter"}.issubset(src.columns):
+            src = src.sort_values(["ticker", "year", "quarter"]).copy()
+            src["y_next_rd_intensity_change"] = src.groupby("ticker", sort=False)["rd_intensity"].shift(-1) - src["rd_intensity"]
+
+    if "y_next_rd_intensity_change" not in src.columns:
+        raise ValueError(
+            "Unable to build 'y_next_rd_intensity_change'. Expected rd_intensity data in regression_dataset.parquet."
+        )
+
+    src["y_next_rd_intensity_change"] = pd.to_numeric(src["y_next_rd_intensity_change"], errors="coerce")
+    src["rd_increased_next_quarter"] = np.where(
+        src["y_next_rd_intensity_change"].notna(),
+        (src["y_next_rd_intensity_change"] > 0).astype(int),
+        np.nan,
     )
 
+    keep_cols = ["doc_id", "y_next_rd_intensity_change", "rd_increased_next_quarter"]
+    for c in ["log_mktcap", "eps_positive", "rd_intensity", "year", "quarter", "ticker"]:
+        if c in src.columns:
+            keep_cols.append(c)
 
-def _parse_doc_id(doc_id: str) -> Tuple[Optional[str], Optional[int], Optional[int]]:
-    """Extract ticker, year, quarter from doc_id like 'AAPL_2023Q1'."""
-    parts = str(doc_id).rsplit("_", 1)
-    if len(parts) != 2:
-        return None, None, None
-    ticker = parts[0]
-    yq = parts[1]
-    if "Q" not in yq:
-        return ticker, None, None
+    out = src[keep_cols].drop_duplicates("doc_id")
+    out = doc_metrics_df[["doc_id"]].drop_duplicates().merge(out, on="doc_id", how="left")
+    return out
+
+
+def _prepare_extra_matrix(
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    feature_cols: Sequence[str],
+) -> Tuple[sparse.csr_matrix, sparse.csr_matrix]:
+    if not feature_cols:
+        return sparse.csr_matrix((len(train_df), 0)), sparse.csr_matrix((len(test_df), 0))
+
+    imputer = SimpleImputer(strategy="constant", fill_value=0.0)
+    scaler = StandardScaler()
+
+    X_train = imputer.fit_transform(train_df[feature_cols])
+    X_test = imputer.transform(test_df[feature_cols])
+
+    X_train = scaler.fit_transform(X_train)
+    X_test = scaler.transform(X_test)
+    return sparse.csr_matrix(X_train), sparse.csr_matrix(X_test)
+
+
+def _safe_roc_auc(y_true: np.ndarray, y_score: np.ndarray) -> float:
+    if np.unique(y_true).size < 2:
+        return float("nan")
     try:
-        year = int(yq.split("Q")[0])
-        quarter = int(yq.split("Q")[1])
-        return ticker, year, quarter
+        return float(roc_auc_score(y_true, y_score))
     except Exception:
-        return ticker, None, None
+        return float("nan")
 
-
-def _build_doc_corpus(
-    sentences_df: pd.DataFrame,
-    section: Optional[str] = None,
-) -> pd.DataFrame:
-    """
-    Aggregate sentence-level text to document level.
-
-    Args:
-        sentences_df: Sentence-level DataFrame with columns ['doc_id', 'text', 'section'].
-        section: If provided, filter to this section ('speech' or 'qa').
-
-    Returns:
-        DataFrame with ['doc_id', 'text'] where text is the concatenated document.
-    """
-    df = sentences_df[["doc_id", "text"] + (["section"] if "section" in sentences_df.columns else [])].copy()
-    if section and "section" in df.columns:
-        df = df[df["section"] == section]
-
-    df["text"] = df["text"].fillna("").astype(str)
-    corpus = (
-        df.groupby("doc_id", sort=False)["text"]
-        .agg(" ".join)
-        .reset_index()
-    )
-    return corpus
-
-
-def _doc_frequencies(vectorizer: TfidfVectorizer, X_bin: np.ndarray) -> np.ndarray:
-    """Return document-frequency counts for each vocabulary term."""
-    return np.asarray(X_bin.sum(axis=0)).flatten()
-
-
-def _precompute_corpus_features(
-    corpus_df: pd.DataFrame,
-    text_col: str = "text",
-    doc_id_col: str = "doc_id",
-    max_features: int = 5000,
-    ngram_range: Tuple[int, int] = (1, 2),
-    min_df: float = DEFAULT_TFIDF_MIN_DF,
-    max_df: float = DEFAULT_TFIDF_MAX_DF,
-) -> Dict:
-    """
-    Fit TF-IDF and scaling once for a corpus, then reuse across multiple targets.
-    """
-    base = corpus_df[[doc_id_col, text_col]].copy().reset_index(drop=True)
-    base[text_col] = base[text_col].fillna("").astype(str)
-
-    vectorizer = TfidfVectorizer(
-        max_features=max_features,
-        ngram_range=ngram_range,
-        sublinear_tf=True,
-        min_df=min_df,
-        max_df=max_df,
-    )
-    X = vectorizer.fit_transform(base[text_col].tolist())
-
-    scaler = StandardScaler(with_mean=False)
-    X_scaled = scaler.fit_transform(X)
-
-    doc_lookup = pd.DataFrame(
-        {
-            doc_id_col: base[doc_id_col].values,
-            "_row_idx": np.arange(len(base), dtype=np.int32),
-        }
-    )
-
-    return {
-        "doc_lookup": doc_lookup,
-        "X_scaled": X_scaled,
-        "vectorizer": vectorizer,
-        "doc_id_col": doc_id_col,
-        "text_col": text_col,
-    }
-
-
-# ---------------------------------------------------------------------------
-# Core modelling
-# ---------------------------------------------------------------------------
 
 def fit_lasso_ngram(
     corpus_df: pd.DataFrame,
@@ -226,204 +266,176 @@ def fit_lasso_ngram(
     random_state: int = 42,
     precomputed_features: Optional[Dict] = None,
     compute_cv_predictions: bool = True,
-    tfidf_min_df: float = DEFAULT_TFIDF_MIN_DF,
-    tfidf_max_df: float = DEFAULT_TFIDF_MAX_DF,
-    lasso_inner_cv: int = DEFAULT_LASSO_INNER_CV,
-    lasso_n_alphas: int = DEFAULT_LASSO_N_ALPHAS,
-    lasso_max_iter: int = DEFAULT_LASSO_MAX_ITER,
-    lasso_tol: float = DEFAULT_LASSO_TOL,
-    lasso_n_jobs: int = DEFAULT_MODEL_N_JOBS,
-    oof_n_jobs: int = DEFAULT_MODEL_N_JOBS,
+    extra_features_df: Optional[pd.DataFrame] = None,
+    task_type: Optional[str] = None,
 ) -> Dict:
-    """
-    Fit a TF-IDF → LassoCV pipeline predicting *target_col* from text.
+    """Fit sparse text model with optional sentiment/structured features."""
+    del precomputed_features
 
-    Args:
-        corpus_df:    DataFrame with [doc_id, text].
-        target_df:    DataFrame with [doc_id, target_col].
-        target_col:   Name of the outcome variable (e.g. 'overall_kw_ai_ratio').
-        max_features: Maximum vocabulary size for TF-IDF.
-        ngram_range:  N-gram range for TF-IDF vectorizer.
-        cv:           Number of cross-validation folds.
-
-    Returns:
-        dict with keys: 'coef_df', 'vectorizer', 'lasso', 'y_true', 'y_pred',
-                        'alpha', 'r2', 'kendall_tau', 'kendall_p'
-    """
-    # Keep API compatibility: precomputed_features may still be supplied by callers,
-    # but OOF evaluation intentionally uses raw text + fold-local preprocessing to
-    # avoid leakage. Final coefficient extraction is also fit on the merged corpus.
     merged = corpus_df[[doc_id_col, text_col]].merge(
-        target_df[[doc_id_col, target_col]].dropna(), on=doc_id_col, how="inner"
+        target_df[[doc_id_col, target_col]].dropna(),
+        on=doc_id_col,
+        how="inner",
     )
-    if len(merged) < 30:
-        print(f"[Lasso] Insufficient data for '{target_col}': only {len(merged)} documents.")
+    if extra_features_df is not None and len(extra_features_df) > 0:
+        merged = merged.merge(extra_features_df, on=doc_id_col, how="left")
+
+    if len(merged) < 12:
         return {}
 
     merged[text_col] = merged[text_col].fillna("").astype(str)
-    texts = merged[text_col].tolist()
-    y = merged[target_col].to_numpy(dtype=float)
+    y = pd.to_numeric(merged[target_col], errors="coerce").to_numpy()
+    valid = ~np.isnan(y)
+    merged = merged.loc[valid].reset_index(drop=True)
+    y = y[valid]
 
-    # Cross-validated out-of-fold predictions for unbiased Kendall Tau
-    y_pred = None
-    tau = None
-    p_val = None
-    r2_oof = None
-    if compute_cv_predictions:
-        n_outer = min(max(2, int(cv)), len(y))
-        if n_outer >= 2:
-            print(
-                "  Calculating leakage-free OOF predictions for Kendall Tau "
-                "(nested TF-IDF/scaler/LassoCV, parallel outer CV)..."
-            )
-            splitter = KFold(n_splits=n_outer, shuffle=True, random_state=random_state)
-            splits = list(splitter.split(texts))
-            min_train_size = min((len(train_idx) for train_idx, _ in splits), default=0)
-            inner_cv_oof = min(max(2, int(lasso_inner_cv)), min_train_size)
-
-            if inner_cv_oof < 2:
-                y_pred = np.full(len(y), float(np.mean(y)), dtype=float)
-            else:
-                text_array = np.asarray(texts, dtype=object)
-                try:
-                    oof_estimator = _build_lasso_text_pipeline(
-                        inner_cv=inner_cv_oof,
-                        max_features=max_features,
-                        ngram_range=ngram_range,
-                        random_state=random_state,
-                        tfidf_min_df=tfidf_min_df,
-                        tfidf_max_df=tfidf_max_df,
-                        lasso_n_alphas=lasso_n_alphas,
-                        lasso_max_iter=lasso_max_iter,
-                        lasso_tol=lasso_tol,
-                        lasso_n_jobs=lasso_n_jobs,
-                    )
-                    y_pred = cross_val_predict(
-                        oof_estimator,
-                        text_array,
-                        y,
-                        cv=splits,
-                        method="predict",
-                        n_jobs=oof_n_jobs,
-                    )
-                except Exception:
-                    # Fallback keeps OOF evaluation robust if a fold has an empty vocabulary.
-                    y_pred = np.full(len(y), np.nan, dtype=float)
-                    for fold_idx, (train_idx, test_idx) in enumerate(splits, start=1):
-                        train_text = [texts[i] for i in train_idx]
-                        test_text = [texts[i] for i in test_idx]
-                        y_train = y[train_idx]
-                        inner_cv_fold = min(max(2, int(lasso_inner_cv)), len(train_idx))
-                        if inner_cv_fold < 2:
-                            y_pred[test_idx] = float(np.mean(y_train))
-                            continue
-                        try:
-                            pipe = _build_lasso_text_pipeline(
-                                inner_cv=inner_cv_fold,
-                                max_features=max_features,
-                                ngram_range=ngram_range,
-                                random_state=random_state,
-                                tfidf_min_df=tfidf_min_df,
-                                tfidf_max_df=tfidf_max_df,
-                                lasso_n_alphas=lasso_n_alphas,
-                                lasso_max_iter=lasso_max_iter,
-                                lasso_tol=lasso_tol,
-                                lasso_n_jobs=lasso_n_jobs,
-                            )
-                            pipe.fit(train_text, y_train)
-                            y_pred[test_idx] = pipe.predict(test_text)
-                        except Exception:
-                            y_pred[test_idx] = float(np.mean(y_train))
-                        if fold_idx == 1 and len(test_idx) > 0:
-                            # Keep a lightweight progress trace for long runs.
-                            print(f"    Fold {fold_idx}/{n_outer}: train={len(train_idx)} test={len(test_idx)}")
-            valid = ~np.isnan(y_pred)
-            if valid.sum() >= 2:
-                tau, p_val = kendalltau(y[valid], y_pred[valid])
-                ss_res = float(np.sum((y[valid] - y_pred[valid]) ** 2))
-                ss_tot = float(np.sum((y[valid] - np.mean(y[valid])) ** 2))
-                r2_oof = (1.0 - ss_res / ss_tot) if ss_tot > 0 else np.nan
-
-    # Final full-sample fit for coefficient interpretation (not for OOF evaluation).
-    try:
-        final_inner_cv = min(max(2, int(lasso_inner_cv)), len(y))
-        final_pipe = _build_lasso_text_pipeline(
-            inner_cv=final_inner_cv,
-            max_features=max_features,
-            ngram_range=ngram_range,
-            random_state=random_state,
-            tfidf_min_df=tfidf_min_df,
-            tfidf_max_df=tfidf_max_df,
-            lasso_n_alphas=lasso_n_alphas,
-            lasso_max_iter=lasso_max_iter,
-            lasso_tol=lasso_tol,
-            lasso_n_jobs=lasso_n_jobs,
-        )
-        final_pipe.fit(texts, y)
-        vectorizer = final_pipe.named_steps["tfidf"]
-        scaler = final_pipe.named_steps["scaler"]
-        lasso = final_pipe.named_steps["lasso"]
-        X = vectorizer.transform(texts)
-        X_scaled = scaler.transform(X)
-        X_bin = (X > 0).astype(np.int8)
-        doc_freq = _doc_frequencies(vectorizer, X_bin)
-        r2 = float(final_pipe.score(texts, y))
-        alpha = float(getattr(lasso, "alpha_", getattr(lasso, "alpha", np.nan)))
-        print(f"  Training final LassoCV pipeline on {X_scaled.shape[0]} samples x {X_scaled.shape[1]} features...")
-    except ValueError as e:
-        print(f"[Lasso] Could not fit final pipeline for '{target_col}': {e}")
+    if len(merged) < 12:
         return {}
 
-    # Build coefficient DataFrame
-    feature_names = vectorizer.get_feature_names_out()
-    coefs = lasso.coef_
+    if task_type is None:
+        uniq = set(pd.Series(y).dropna().astype(int).unique().tolist())
+        task_type = "classification" if uniq.issubset({0, 1}) else "regression"
 
-    coef_df = pd.DataFrame({
-        "feature": feature_names,
-        "coefficient": coefs,
-        "doc_frequency": doc_freq,
-        "log_doc_frequency": np.log1p(doc_freq),
-    })
-    coef_df = coef_df[coef_df["coefficient"] != 0].copy()
-    coef_df = coef_df.sort_values("coefficient", ascending=False)
+    extra_cols = []
+    if extra_features_df is not None:
+        extra_cols = [c for c in merged.columns if c not in {doc_id_col, text_col, target_col}]
 
-    print(f"\n[Lasso → {target_col}]")
-    print(f"  Alpha (best):   {alpha:.6f}")
-    print(f"  R² (train):     {r2:.4f}")
-    if r2_oof is not None:
-        print(f"  R² (OOF):       {r2_oof:.4f}")
-    tau_str = f"{tau:.4f}" if tau is not None else "skipped"
-    p_str = f"{p_val:.4f}" if p_val is not None else "skipped"
-    print(f"  Kendall's Tau (OOF):  {tau_str}  (p={p_str})")
-    print(f"  Non-zero coefs: {(coefs != 0).sum()} / {len(coefs)}")
+    splitter = (
+        StratifiedKFold(n_splits=min(max(2, cv), len(merged)), shuffle=True, random_state=random_state)
+        if task_type == "classification"
+        else KFold(n_splits=min(max(2, cv), len(merged)), shuffle=True, random_state=random_state)
+    )
 
-    if len(coef_df) > 0:
-        print("\n  Top 10 POSITIVE features (management language → higher score):")
-        print(coef_df.head(10)[["feature", "coefficient", "doc_frequency"]].to_string(index=False))
-        print("\n  Top 10 NEGATIVE features (analyst language → lower score):")
-        print(coef_df.tail(10)[["feature", "coefficient", "doc_frequency"]].to_string(index=False))
+    oof_score = np.full(len(merged), np.nan, dtype=float)
+
+    if compute_cv_predictions:
+        for train_idx, test_idx in splitter.split(merged, y if task_type == "classification" else None):
+            tr = merged.iloc[train_idx]
+            te = merged.iloc[test_idx]
+            y_tr = y[train_idx]
+
+            vect = TfidfVectorizer(
+                max_features=max_features,
+                ngram_range=ngram_range,
+                sublinear_tf=True,
+                min_df=2,
+                max_df=0.95,
+                stop_words="english",
+            )
+            Xtr_text = vect.fit_transform(tr[text_col].tolist())
+            Xte_text = vect.transform(te[text_col].tolist())
+
+            if extra_cols:
+                Xtr_extra, Xte_extra = _prepare_extra_matrix(tr, te, extra_cols)
+                Xtr = sparse.hstack([Xtr_text, Xtr_extra], format="csr")
+                Xte = sparse.hstack([Xte_text, Xte_extra], format="csr")
+            else:
+                Xtr, Xte = Xtr_text, Xte_text
+
+            if task_type == "classification":
+                if np.unique(y_tr).size < 2:
+                    oof_score[test_idx] = float(np.mean(y_tr))
+                    continue
+                model = LogisticRegression(
+                    penalty="l1",
+                    solver="liblinear",
+                    C=0.8,
+                    class_weight="balanced",
+                    random_state=random_state,
+                    max_iter=3000,
+                )
+                model.fit(Xtr, y_tr.astype(int))
+                oof_score[test_idx] = model.predict_proba(Xte)[:, 1]
+            else:
+                model = Lasso(alpha=1e-3, max_iter=5000)
+                model.fit(Xtr, y_tr)
+                oof_score[test_idx] = model.predict(Xte)
+
+    vect_full = TfidfVectorizer(
+        max_features=max_features,
+        ngram_range=ngram_range,
+        sublinear_tf=True,
+        min_df=2,
+        max_df=0.95,
+        stop_words="english",
+    )
+    X_text = vect_full.fit_transform(merged[text_col].tolist())
+
+    if extra_cols:
+        X_extra, _ = _prepare_extra_matrix(merged, merged, extra_cols)
+        X_full = sparse.hstack([X_text, X_extra], format="csr")
+    else:
+        X_full = X_text
+
+    if task_type == "classification":
+        final_model = LogisticRegression(
+            penalty="l1",
+            solver="liblinear",
+            C=0.8,
+            class_weight="balanced",
+            random_state=random_state,
+            max_iter=3000,
+        )
+        final_model.fit(X_full, y.astype(int))
+        if not compute_cv_predictions:
+            oof_score = final_model.predict_proba(X_full)[:, 1]
+        y_hat = (oof_score >= 0.5).astype(int)
+        metrics = {
+            "ROC-AUC": _safe_roc_auc(y.astype(int), oof_score),
+            "Accuracy": float(accuracy_score(y.astype(int), y_hat)),
+            "Precision": float(precision_score(y.astype(int), y_hat, zero_division=0)),
+            "Recall": float(recall_score(y.astype(int), y_hat, zero_division=0)),
+            "F1-Score": float(f1_score(y.astype(int), y_hat, zero_division=0)),
+        }
+    else:
+        final_model = Lasso(alpha=1e-3, max_iter=5000)
+        final_model.fit(X_full, y)
+        if not compute_cv_predictions:
+            oof_score = final_model.predict(X_full)
+        mse = float(np.mean((y - oof_score) ** 2))
+        ss_tot = float(np.sum((y - np.mean(y)) ** 2))
+        metrics = {
+            "MSE": mse,
+            "R2": float(1.0 - np.sum((y - oof_score) ** 2) / ss_tot) if ss_tot > 0 else float("nan"),
+        }
+
+    text_features = vect_full.get_feature_names_out().tolist()
+    feature_names = text_features + extra_cols
+    coefs = final_model.coef_.ravel()
+
+    doc_freq = np.asarray((X_text > 0).sum(axis=0)).ravel().tolist()
+    extra_doc_freq = [np.nan] * len(extra_cols)
+
+    coef_df = pd.DataFrame(
+        {
+            "feature": feature_names,
+            "coefficient": coefs,
+            "doc_frequency": doc_freq + extra_doc_freq,
+            "log_doc_frequency": np.log1p(np.array(doc_freq + [0] * len(extra_cols), dtype=float)),
+            "feature_type": ["ngram"] * len(text_features) + ["sentiment_or_structured"] * len(extra_cols),
+        }
+    )
+    coef_df = coef_df[coef_df["coefficient"] != 0].copy().sort_values("coefficient", ascending=False)
 
     return {
         "coef_df": coef_df,
-        "vectorizer": vectorizer,
-        "lasso": lasso,
+        "vectorizer": vect_full,
+        "lasso": final_model,
         "y_true": y,
-        "y_pred": y_pred,
-        "alpha": alpha,
-        "r2": r2,
-        "r2_train": r2,
-        "r2_oof": r2_oof,
-        "kendall_tau": tau,
-        "kendall_tau_oof": tau,
-        "kendall_p": p_val,
+        "y_pred": oof_score,
+        "alpha": getattr(final_model, "alpha", np.nan),
+        "r2": metrics.get("R2", np.nan),
+        "r2_train": metrics.get("R2", np.nan),
+        "r2_oof": metrics.get("R2", np.nan),
+        "kendall_tau": None,
+        "kendall_tau_oof": None,
+        "kendall_p": None,
         "target_col": target_col,
         "n_docs": len(merged),
+        "metrics": metrics,
+        "task_type": task_type,
     }
 
-
-# ---------------------------------------------------------------------------
-# Visualizations
-# ---------------------------------------------------------------------------
 
 def plot_volcano(
     coef_df: pd.DataFrame,
@@ -431,80 +443,35 @@ def plot_volcano(
     target_col: str = "target",
     top_n_labels: int = 15,
 ) -> None:
-    """
-    Volcano Plot: x = Lasso coefficient, y = log document frequency.
-    The professor's signature visualization for linguistic key-driver analysis.
-
-    Colour coding:
-      - Green  : positive coefficient (associated with HIGHER score)
-      - Red    : negative coefficient (associated with LOWER score)
-      - Points above the median log-freq on either side get labelled.
-    """
     if coef_df is None or len(coef_df) == 0:
-        print("No non-zero coefficients to plot.")
         return
+
     apply_spotify_theme()
+    df = coef_df[coef_df["feature_type"] == "ngram"].copy()
+    if len(df) == 0:
+        return
 
-    df = coef_df.copy()
-    df["color"] = df["coefficient"].apply(
-        lambda c: SPOTIFY_COLORS.get("accent", "#1DB954") if c > 0 else SPOTIFY_COLORS.get("negative", "#FF5A5F")
-    )
+    df["color"] = np.where(df["coefficient"] >= 0, SPOTIFY_COLORS.get("accent", "#1DB954"), SPOTIFY_COLORS.get("negative", "#FF5A5F"))
     df["abs_coef"] = df["coefficient"].abs()
-
-    # Label the most impactful words on each side
-    pos = df[df["coefficient"] > 0].nlargest(top_n_labels, "abs_coef")
-    neg = df[df["coefficient"] < 0].nlargest(top_n_labels, "abs_coef")
-    to_label = pd.concat([pos, neg])
+    to_label = pd.concat([df.nlargest(top_n_labels, "abs_coef"), df.nsmallest(top_n_labels, "abs_coef")]).drop_duplicates("feature")
 
     fig, ax = plt.subplots(figsize=(11, 7))
     fig.patch.set_facecolor(SPOTIFY_COLORS.get("background", "#121212"))
 
-    ax.scatter(
-        df["coefficient"],
-        df["log_doc_frequency"],
-        c=df["color"],
-        alpha=0.65,
-        s=30,
-        linewidths=0,
-    )
-
-    # Annotate top features
+    ax.scatter(df["coefficient"], df["log_doc_frequency"], c=df["color"], alpha=0.65, s=28, linewidths=0)
     for _, row in to_label.iterrows():
-        ax.annotate(
-            row["feature"],
-            xy=(row["coefficient"], row["log_doc_frequency"]),
-            xytext=(4, 2),
-            textcoords="offset points",
-            fontsize=7,
-            color=row["color"],
-            alpha=0.9,
-        )
+        ax.annotate(row["feature"], xy=(row["coefficient"], row["log_doc_frequency"]), xytext=(4, 2), textcoords="offset points", fontsize=7, color=row["color"], alpha=0.85)
 
     ax.axvline(0, color=SPOTIFY_COLORS.get("muted", "#B3B3B3"), linewidth=0.8, linestyle="--")
-
-    ax.set_xlabel("Lasso Coefficient\n← Lower AI Initiation         Higher AI Initiation →", fontsize=11)
-    ax.set_ylabel("log(Document Frequency + 1)", fontsize=11)
-    ax.set_title(
-        f"Volcano Plot — N-gram Lasso Features\nTarget: {target_col}",
-        fontsize=13,
-    )
-
-    # Legend
-    from matplotlib.lines import Line2D
-    legend_elements = [
-        Line2D([0], [0], marker="o", color="w", markerfacecolor=SPOTIFY_COLORS.get("accent", "#1DB954"),
-               markersize=8, label="Increases AI Initiation"),
-        Line2D([0], [0], marker="o", color="w", markerfacecolor=SPOTIFY_COLORS.get("negative", "#FF5A5F"),
-               markersize=8, label="Decreases AI Initiation"),
-    ]
-    ax.legend(handles=legend_elements, loc="upper left", fontsize=9)
+    ax.set_xlabel("Coefficient")
+    ax.set_ylabel("log(Document Frequency + 1)")
+    ax.set_title(f"Volcano Plot (AI N-grams)\nTarget: {target_col}")
     style_axes(ax, grid_axis="y", grid_alpha=0.10)
     style_legend(ax)
 
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     fig.tight_layout()
     save_figure(fig, output_path, dpi=180)
-    print(f"Saved Volcano Plot → {output_path}")
 
 
 def plot_top_coefficients(
@@ -513,78 +480,49 @@ def plot_top_coefficients(
     target_col: str = "target",
     top_n: int = 20,
 ) -> None:
-    """
-    Horizontal bar chart of the top-N positive and top-N negative Lasso coefficients.
-    Complementary to the Volcano Plot for easy readability.
-    """
     if coef_df is None or len(coef_df) == 0:
-        print("No coefficients to plot.")
         return
+
     apply_spotify_theme()
+    top = coef_df.assign(abs_coef=lambda x: x["coefficient"].abs()).nlargest(top_n * 2, "abs_coef")
+    top = top.sort_values("coefficient")
+    colors = [SPOTIFY_COLORS.get("negative", "#FF5A5F") if x < 0 else SPOTIFY_COLORS.get("accent", "#1DB954") for x in top["coefficient"]]
 
-    pos = coef_df.nlargest(top_n, "coefficient")
-    neg = coef_df.nsmallest(top_n, "coefficient")
-    combined = pd.concat([neg, pos]).drop_duplicates("feature")
-    combined = combined.sort_values("coefficient")
-
-    colors = [
-        SPOTIFY_COLORS.get("negative", "#FF5A5F") if c < 0 else SPOTIFY_COLORS.get("accent", "#1DB954")
-        for c in combined["coefficient"]
-    ]
-
-    fig, ax = plt.subplots(figsize=(10, max(6, len(combined) * 0.32)))
+    fig, ax = plt.subplots(figsize=(10, max(6, len(top) * 0.32)))
     fig.patch.set_facecolor(SPOTIFY_COLORS.get("background", "#121212"))
-    ax.barh(combined["feature"], combined["coefficient"], color=colors, alpha=0.8)
+    ax.barh(top["feature"], top["coefficient"], color=colors, alpha=0.85)
     ax.axvline(0, color=SPOTIFY_COLORS.get("muted", "#B3B3B3"), linewidth=0.8)
-    ax.set_xlabel("Lasso Coefficient", fontsize=11)
-    ax.set_title(
-        f"Top ±{top_n} N-gram Features (Lasso)\nTarget: {target_col}",
-        fontsize=13,
-    )
+    ax.set_xlabel("Coefficient")
+    ax.set_title(f"Top Sparse Coefficients\nTarget: {target_col}")
     style_axes(ax, grid_axis="x", grid_alpha=0.10)
 
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     fig.tight_layout()
     save_figure(fig, output_path, dpi=180)
-    print(f"Saved coefficient plot → {output_path}")
 
 
-def plot_actual_vs_predicted(
-    y_true: np.ndarray,
-    y_pred: np.ndarray,
-    output_path: str,
-    target_col: str = "target",
-    tau: float = None,
-) -> None:
-    """Scatter plot of actual vs. cross-validated predicted values."""
+def _plot_roc(y_true: np.ndarray, y_score: np.ndarray, output_path: str, target_col: str) -> None:
+    if np.unique(y_true).size < 2:
+        return
     apply_spotify_theme()
+
+    auc = _safe_roc_auc(y_true, y_score)
+    fpr, tpr, _ = roc_curve(y_true, y_score)
+
     fig, ax = plt.subplots(figsize=(7, 6))
     fig.patch.set_facecolor(SPOTIFY_COLORS.get("background", "#121212"))
-    ax.scatter(y_true, y_pred, alpha=0.55, s=25, color=SPOTIFY_COLORS.get("blue", "#4EA1FF"))
-
-    lims = [min(y_true.min(), y_pred.min()), max(y_true.max(), y_pred.max())]
-    ax.plot(lims, lims, linestyle="--", linewidth=0.8, color=SPOTIFY_COLORS.get("muted", "#B3B3B3"), label="Perfect fit")
-
-    tau_str = f"Kendall's τ = {tau:.3f}" if tau is not None else ""
-    ax.set_xlabel("Actual", fontsize=11)
-    ax.set_ylabel("CV Predicted", fontsize=11)
-    ax.set_title(
-        f"Actual vs. Predicted (5-fold CV)\n{target_col}  —  {tau_str}",
-        fontsize=12,
-    )
-    ax.legend(fontsize=9)
+    ax.plot(fpr, tpr, color=SPOTIFY_COLORS.get("blue", "#4EA1FF"), linewidth=2.0, label=f"ROC-AUC={auc:.3f}")
+    ax.plot([0, 1], [0, 1], linestyle="--", color=SPOTIFY_COLORS.get("muted", "#B3B3B3"), linewidth=1.0)
+    ax.set_xlabel("False Positive Rate")
+    ax.set_ylabel("True Positive Rate")
+    ax.set_title(f"Forward R&D Increase ROC\nTarget: {target_col}")
+    ax.legend(loc="lower right", fontsize=9)
     style_axes(ax, grid_axis="both", grid_alpha=0.10)
-    style_legend(ax)
 
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     fig.tight_layout()
     save_figure(fig, output_path, dpi=180)
-    print(f"Saved actual-vs-predicted plot → {output_path}")
 
-
-# ---------------------------------------------------------------------------
-# Full pipeline
-# ---------------------------------------------------------------------------
 
 def run_lasso_text_analysis(
     sentences_path: str,
@@ -596,221 +534,100 @@ def run_lasso_text_analysis(
     cv: int = 5,
     compute_cv_predictions: bool = True,
 ) -> Dict[str, Dict]:
-    """
-    End-to-end N-gram Lasso pipeline.
+    """End-to-end sparse text model for forward R&D investment prediction."""
+    del initiation_scores_path
 
-    Targets:
-      1. overall_kw_ai_ratio     — overall AI discussion intensity
-      2. ai_initiation_score     — management-proactiveness score (if available)
-
-    For each target, produces:
-      - Volcano Plot
-      - Coefficient bar chart
-      - Actual vs. Predicted scatter with Kendall's Tau
-
-    Args:
-        sentences_path:        Parquet with sentence-level data.
-        doc_metrics_path:      Parquet with document-level AI metrics.
-        initiation_scores_path: Optional parquet with initiation scores.
-        output_dir:            Directory for saving figures.
-
-    Returns:
-        dict mapping target_col → results dict from fit_lasso_ngram().
-    """
     os.makedirs(output_dir, exist_ok=True)
 
-    print("Loading sentence data...")
     sentences_df = pd.read_parquet(sentences_path)
-
-    print("Loading document metrics...")
     doc_metrics = pd.read_parquet(doc_metrics_path)
 
-    # Build full-document corpus (speech + Q&A combined)
-    print("Building document corpus...")
     corpus_df = _build_doc_corpus(sentences_df)
-    print(f"  Documents in corpus: {len(corpus_df)}")
+    sentiment_df = compute_ai_sentiment_features(sentences_df)
 
-    # Build also speech-only and qa-only corpora
-    speech_corpus = _build_doc_corpus(sentences_df, section="speech")
-    qa_corpus     = _build_doc_corpus(sentences_df, section="qa")
+    target_df = _load_forward_rd_targets(doc_metrics_path=doc_metrics_path, doc_metrics_df=doc_metrics)
 
-    # Precompute TF-IDF/scaled matrices once per corpus variant (reused across targets)
-    corpus_map = {
-        "full": corpus_df,
-        "speech": speech_corpus,
-        "qa": qa_corpus,
-    }
-    precomputed_by_corpus: Dict[str, Dict] = {}
+    sentiment_path = os.path.join(output_dir, "ai_sentiment_features.csv")
+    sentiment_df.to_csv(sentiment_path, index=False)
 
-    def _get_precomputed(corpus_key: str) -> Dict:
-        if corpus_key not in precomputed_by_corpus:
-            cdf = corpus_map[corpus_key]
-            print(
-                f"Precomputing TF-IDF for {corpus_key} corpus "
-                f"({len(cdf)} docs, max_features={max_features}, ngrams={ngram_range})..."
-            )
-            precomputed_by_corpus[corpus_key] = _precompute_corpus_features(
-                cdf,
-                max_features=max_features,
-                ngram_range=ngram_range,
-            )
-        return precomputed_by_corpus[corpus_key]
+    targets: List[Tuple[str, str]] = []
+    if "rd_increased_next_quarter" in target_df.columns:
+        non_missing = target_df["rd_increased_next_quarter"].dropna()
+        if len(non_missing) >= 12 and non_missing.nunique() >= 2:
+            targets.append(("rd_increased_next_quarter", "classification"))
+    if "y_next_rd_intensity_change" in target_df.columns:
+        non_missing = target_df["y_next_rd_intensity_change"].dropna()
+        if len(non_missing) >= 12:
+            targets.append(("y_next_rd_intensity_change", "regression"))
 
-    # Prepare target DataFrames
-    targets = []
+    if not targets:
+        raise ValueError("No valid forward-R&D targets available for Stage 12.")
 
-    # Target 1: overall AI ratio from doc_metrics
-    if "overall_kw_ai_ratio" in doc_metrics.columns:
-        targets.append(("overall_kw_ai_ratio", "full", doc_metrics))
+    all_results: Dict[str, Dict] = {}
+    summary_rows: List[Dict[str, float]] = []
 
-    # Target 2: speech AI ratio — use speech-only corpus
-    if "speech_kw_ai_ratio" in doc_metrics.columns:
-        targets.append(("speech_kw_ai_ratio", "speech", doc_metrics))
-
-    # Target 3: Q&A AI ratio — use Q&A-only corpus
-    if "qa_kw_ai_ratio" in doc_metrics.columns:
-        targets.append(("qa_kw_ai_ratio", "qa", doc_metrics))
-
-    # Target 4: AI initiation score (management proactiveness)
-    if initiation_scores_path and os.path.exists(initiation_scores_path):
-        init_df = pd.read_parquet(initiation_scores_path)
-        if "ai_initiation_score" in init_df.columns:
-            if "total_ai_exchanges" in init_df.columns:
-                before = len(init_df)
-                init_df = init_df[init_df["total_ai_exchanges"].fillna(0) > 0].copy()
-                removed = before - len(init_df)
-                print(
-                    f"Filtering initiation target to active AI exchanges only: "
-                    f"removed {removed}, remaining {len(init_df)}"
-                )
-            if len(init_df) > 30:
-                # Target is defined from Q&A exchanges; use the Q&A corpus for alignment.
-                targets.append(("ai_initiation_score", "qa", init_df))
-            else:
-                print("Skipping ai_initiation_score: not enough active-AI rows after filtering.")
-        else:
-            print("Skipping ai_initiation_score: not enough data.")
-
-    all_results = {}
-
-    for target_col, corpus_key, target_df in targets:
-        print(f"\n{'='*60}")
-        print(f"Fitting Lasso for target: {target_col}")
-        print("="*60)
-        precomputed = None  # OOF path uses fold-local preprocessing; keep simple and robust.
-
+    for target_col, task in targets:
         res = fit_lasso_ngram(
-            corpus_df=corpus_map[corpus_key],
+            corpus_df=corpus_df,
             target_df=target_df,
             target_col=target_col,
             max_features=max_features,
             ngram_range=ngram_range,
             cv=cv,
-            precomputed_features=precomputed,
             compute_cv_predictions=compute_cv_predictions,
+            extra_features_df=sentiment_df,
+            task_type=task,
         )
-
         if not res:
             continue
 
-        coef_df = res["coef_df"]
-        tau     = res["kendall_tau"]
-        y_true  = res["y_true"]
-        y_pred  = res["y_pred"]
-
         safe_name = target_col.replace("/", "_")
-
-        # Save coefficient table
+        coef_df = res["coef_df"]
         coef_csv = os.path.join(output_dir, f"lasso_coefs_{safe_name}.csv")
         coef_df.to_csv(coef_csv, index=False)
-        print(f"Saved coefficient table → {coef_csv}")
 
-        # Volcano Plot
-        plot_volcano(
-            coef_df,
-            output_path=os.path.join(output_dir, f"volcano_{safe_name}.png"),
-            target_col=target_col,
-        )
+        plot_volcano(coef_df, os.path.join(output_dir, f"volcano_{safe_name}.png"), target_col=target_col)
+        plot_top_coefficients(coef_df, os.path.join(output_dir, f"lasso_coef_bar_{safe_name}.png"), target_col=target_col)
 
-        # Coefficient bar chart
-        plot_top_coefficients(
-            coef_df,
-            output_path=os.path.join(output_dir, f"lasso_coef_bar_{safe_name}.png"),
-            target_col=target_col,
-        )
+        row = {
+            "target": target_col,
+            "task_type": task,
+            "n_docs": res["n_docs"],
+            "nonzero_features": int(len(coef_df)),
+        }
+        row.update(res["metrics"])
 
-        # Actual vs. predicted
-        if compute_cv_predictions and y_pred is not None:
-            plot_actual_vs_predicted(
-                y_true, y_pred,
-                output_path=os.path.join(output_dir, f"lasso_fit_{safe_name}.png"),
+        if task == "classification":
+            _plot_roc(
+                y_true=res["y_true"].astype(int),
+                y_score=res["y_pred"],
+                output_path=os.path.join(output_dir, f"lasso_roc_{safe_name}.png"),
                 target_col=target_col,
-                tau=tau,
             )
 
+        summary_rows.append(row)
         all_results[target_col] = res
 
-    # Summary table
-    if all_results:
-        summary_rows = []
-        for tgt, r in all_results.items():
-            summary_rows.append({
-                "target": tgt,
-                "n_docs": r["n_docs"],
-                "alpha": round(r["alpha"], 6),
-                "r2_train": round(r.get("r2_train", r["r2"]), 4),
-                "r2_oof": None if r.get("r2_oof") is None else round(r["r2_oof"], 4),
-                "kendall_tau": None if r["kendall_tau"] is None else round(r["kendall_tau"], 4),
-                "kendall_p": None if r["kendall_p"] is None else round(r["kendall_p"], 4),
-                "nonzero_features": len(r["coef_df"]),
-            })
-        summary_df = pd.DataFrame(summary_rows)
-        summary_path = os.path.join(output_dir, "lasso_summary.csv")
-        summary_df.to_csv(summary_path, index=False)
-        print(f"\nSaved Lasso summary table → {summary_path}")
-        print(summary_df.to_string(index=False))
+    summary_df = pd.DataFrame(summary_rows)
+    summary_path = os.path.join(output_dir, "lasso_summary.csv")
+    summary_df.to_csv(summary_path, index=False)
 
     return all_results
 
 
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
-
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="N-gram Lasso + Volcano Plot")
-    parser.add_argument(
-        "--sentences",
-        default="outputs/features/sentences_with_keywords.parquet",
-        help="Path to sentence-level parquet with 'text', 'doc_id', 'section'.",
-    )
-    parser.add_argument(
-        "--metrics",
-        default="outputs/features/document_metrics.parquet",
-        help="Path to document-level metrics parquet.",
-    )
-    parser.add_argument(
-        "--initiation",
-        default="outputs/features/initiation_scores.parquet",
-        help="(Optional) Path to initiation scores parquet.",
-    )
-    parser.add_argument(
-        "--output-dir",
-        default="outputs/figures",
-        help="Directory to save figures and CSVs.",
-    )
+    parser = argparse.ArgumentParser(description="Forward R&D text/sentiment sparse modeling")
+    parser.add_argument("--sentences", default="outputs/features/sentences_with_keywords.parquet")
+    parser.add_argument("--metrics", default="outputs/features/document_metrics.parquet")
+    parser.add_argument("--initiation", default="outputs/features/initiation_scores.parquet")
+    parser.add_argument("--output-dir", default="outputs/figures")
     parser.add_argument("--max-features", type=int, default=5000)
     parser.add_argument("--ngram-min", type=int, default=1)
     parser.add_argument("--ngram-max", type=int, default=2)
     parser.add_argument("--cv", type=int, default=5)
-    parser.add_argument(
-        "--skip-cv-pred",
-        action="store_true",
-        help="Skip outer cross-validated predictions/Kendall Tau scatter for faster runs.",
-    )
-
+    parser.add_argument("--skip-cv-pred", action="store_true")
     args = parser.parse_args()
 
     run_lasso_text_analysis(

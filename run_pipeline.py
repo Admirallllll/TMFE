@@ -4,6 +4,7 @@ Main Pipeline Script
 End-to-end orchestration of the S&P 500 AI Narrative Text Mining project.
 
 Stages (ai_method dependent):
+0. Data Download and Process (Produce final_dataset.csv/parquet)
 1. Parse transcripts (Speech/Q&A splitting)
 2. Split into sentences
 3. Compute keyword baseline
@@ -52,9 +53,10 @@ class Tee:
 
 
 def run_pipeline(
-    input_dataset: str = "final_dataset.parquet",
-    wrds_path: str = "Sp500_meta_data.csv",
+    input_dataset: str = "data/final_dataset.parquet",
+    wrds_path: str = "data/wrds.csv",
     output_dir: str = "outputs",
+    data_dir: str = "data",
     dev_mode: bool = False,
     dev_sample: int = 100,
     seed: int = 42,
@@ -71,10 +73,12 @@ def run_pipeline(
     benchmark_cv_folds: int = 5,
     benchmark_text_model: str = "ratios",
     benchmark_text_section: str = "qa",
+    run_download: bool = False,
     run_research_report: bool = True,
     report_output_dir: str | None = None,
     research_target: str = "y_next_mktcap_growth",
     research_test_quarters: int = 4,
+    start_stage: int = 0,
 ):
     """
     Run the full pipeline.
@@ -137,10 +141,30 @@ def run_pipeline(
         figures_dir = f"{output_dir}/figures"
         report_dir = report_output_dir or os.path.join(output_dir, "report")
 
-        for d in [features_dir, figures_dir]:
+        for d in [features_dir, figures_dir, data_dir]:
             os.makedirs(d, exist_ok=True)
 
         sample_n = dev_sample if dev_mode else None
+
+        # =========================================================================
+        # Stage 0: Data Download & Process
+        # =========================================================================
+        if start_stage <= 0 and run_download:
+            print("\n" + "="*70)
+            print("STAGE 0: Data Download & Process")
+            print("="*70)
+            
+            from src.preprocessing.data_download import prepare_dataset
+
+            # When downloading, the input_dataset path will be overridden to the generated file in data_dir
+            input_dataset = prepare_dataset(
+                output_dir=data_dir,
+                wrds_meta_path=wrds_path,
+                strict_repro=False 
+            )
+            print(f"Data download finished. Input dataset is now: {input_dataset}")
+        else:
+            print("\n[Skipping data download stage: run_download=False]")
 
         # Validate input dataset schema early (high-stakes fail-fast)
         import pandas as pd
@@ -170,48 +194,51 @@ def run_pipeline(
         # =========================================================================
         # Stage 1: Parse Transcripts
         # =========================================================================
-        print("\n" + "="*70)
-        print("STAGE 1: Parse Transcripts (Speech/Q&A Splitting)")
-        print("="*70)
-
-        from src.preprocessing.transcript_parser import process_dataset as parse_transcripts
-
         parsed_path = f"{features_dir}/parsed_transcripts.parquet"
-        if not os.path.exists(parsed_path) or dev_mode:
-            parse_transcripts(input_dataset, parsed_path, sample_n)
-        else:
-            print(f"Using existing parsed transcripts: {parsed_path}")
+        if start_stage <= 1:
+            print("\n" + "="*70)
+            print("STAGE 1: Parse Transcripts (Speech/Q&A Splitting)")
+            print("="*70)
+    
+            from src.preprocessing.transcript_parser import process_dataset as parse_transcripts
+    
+            if not os.path.exists(parsed_path) or dev_mode:
+                parse_transcripts(input_dataset, parsed_path, sample_n)
+            else:
+                print(f"Using existing parsed transcripts: {parsed_path}")
 
         # =========================================================================
         # Stage 2: Split into Sentences
         # =========================================================================
-        print("\n" + "="*70)
-        print("STAGE 2: Split into Sentences")
-        print("="*70)
-
-        from src.preprocessing.sentence_splitter import create_sentence_dataset
-
         sentences_path = f"{features_dir}/sentences.parquet"
-        if not os.path.exists(sentences_path) or dev_mode:
-            create_sentence_dataset(parsed_path, sentences_path, sample_n)
-        else:
-            print(f"Using existing sentences: {sentences_path}")
+        if start_stage <= 2:
+            print("\n" + "="*70)
+            print("STAGE 2: Split into Sentences")
+            print("="*70)
+    
+            from src.preprocessing.sentence_splitter import create_sentence_dataset
+    
+            if not os.path.exists(sentences_path) or dev_mode:
+                create_sentence_dataset(parsed_path, sentences_path, sample_n)
+            else:
+                print(f"Using existing sentences: {sentences_path}")
 
         # =========================================================================
         # Stage 3: Keyword Detection (Baseline)
         # =========================================================================
-        print("\n" + "="*70)
-        print("STAGE 3: Keyword Detection (Baseline)")
-        print("="*70)
-
-        from src.baselines.keyword_detector import compute_keyword_metrics
-
-        sentences_df = pd.read_parquet(sentences_path)
-        sentences_with_kw = compute_keyword_metrics(
-            sentences_df,
-            num_workers=kw_workers
-        )
-        sentences_with_kw.to_parquet(f"{features_dir}/sentences_with_keywords.parquet", index=False)
+        if start_stage <= 3:
+            print("\n" + "="*70)
+            print("STAGE 3: Keyword Detection (Baseline)")
+            print("="*70)
+    
+            from src.baselines.keyword_detector import compute_keyword_metrics
+    
+            sentences_df = pd.read_parquet(sentences_path)
+            sentences_with_kw = compute_keyword_metrics(
+                sentences_df,
+                num_workers=kw_workers
+            )
+            sentences_with_kw.to_parquet(f"{features_dir}/sentences_with_keywords.parquet", index=False)
 
         ai_method = str(ai_method).lower()
         if ai_method not in {"kw", "topic"}:
@@ -220,7 +247,7 @@ def run_pipeline(
         # =========================================================================
         # Stage 4: Topic Modeling (Quarterly, LDA) - topic only
         # =========================================================================
-        if ai_method == "topic":
+        if start_stage <= 4 and ai_method == "topic":
             print("\n" + "="*70)
             print("STAGE 4: Topic Modeling (Quarterly, LDA)")
             print("="*70)
@@ -240,31 +267,34 @@ def run_pipeline(
         # =========================================================================
         # Stage 5: Compute AI Intensity Metrics
         # =========================================================================
-        print("\n" + "="*70)
-        print("STAGE 5: Compute AI Intensity Metrics")
-        print("="*70)
-
-        from src.metrics.ai_intensity import compute_all_metrics
-
-        sentences_for_metrics = pd.read_parquet(f"{features_dir}/sentences_with_keywords.parquet")
-        compute_all_metrics(sentences_for_metrics, features_dir, figures_dir, num_workers=metrics_workers)
+        if start_stage <= 5:
+            print("\n" + "="*70)
+            print("STAGE 5: Compute AI Intensity Metrics")
+            print("="*70)
+    
+            from src.metrics.ai_intensity import compute_all_metrics
+    
+            sentences_for_metrics = pd.read_parquet(f"{features_dir}/sentences_with_keywords.parquet")
+            compute_all_metrics(sentences_for_metrics, features_dir, figures_dir, num_workers=metrics_workers)
 
         # =========================================================================
         # Stage 6: Compute Initiation Scores
         # =========================================================================
-        print("\n" + "="*70)
-        print("STAGE 6: Compute AI Initiation Scores")
-        print("="*70)
-
-        from src.metrics.initiation_score import compute_all_initiation_metrics
-
-        compute_all_initiation_metrics(sentences_for_metrics, features_dir, figures_dir)
+        if start_stage <= 6:
+            print("\n" + "="*70)
+            print("STAGE 6: Compute AI Initiation Scores")
+            print("="*70)
+    
+            from src.metrics.initiation_score import compute_all_initiation_metrics
+    
+            sentences_for_metrics = pd.read_parquet(f"{features_dir}/sentences_with_keywords.parquet") if 'sentences_for_metrics' not in locals() else sentences_for_metrics
+            compute_all_initiation_metrics(sentences_for_metrics, features_dir, figures_dir)
 
         # =========================================================================
         # Stage 7: Foundational EDA (Funnel + Sparsity Visuals)
         # =========================================================================
         eda_foundation_outputs = None
-        if run_eda_foundation:
+        if start_stage <= 7 and run_eda_foundation:
             print("\n" + "="*70)
             print("STAGE 7: Foundational EDA")
             print("="*70)
@@ -279,58 +309,61 @@ def run_pipeline(
                 figure_dir=os.path.join(figures_dir, "eda"),
                 report_dir=os.path.join(output_dir, "reports", "eda"),
             )
-        else:
+        elif not run_eda_foundation:
             print("\n[Skipping foundational EDA stage: run_eda_foundation=False]")
 
         # =========================================================================
         # Stage 8: Analysis - Time Series
         # =========================================================================
-        print("\n" + "="*70)
-        print("STAGE 8: Time Series Analysis")
-        print("="*70)
-
-        from src.analysis.time_series import run_time_series_analysis
-
-        run_time_series_analysis(
-            f"{features_dir}/document_metrics.parquet",
-            input_dataset,
-            figures_dir
-        )
+        if start_stage <= 8:
+            print("\n" + "="*70)
+            print("STAGE 8: Time Series Analysis")
+            print("="*70)
+    
+            from src.analysis.time_series import run_time_series_analysis
+    
+            run_time_series_analysis(
+                f"{features_dir}/document_metrics.parquet",
+                input_dataset,
+                figures_dir
+            )
 
         # =========================================================================
         # Stage 9: Analysis - Company Quadrants
         # =========================================================================
-        print("\n" + "="*70)
-        print("STAGE 9: Company Quadrant Analysis")
-        print("="*70)
-
-        from src.analysis.company_quadrants import run_quadrant_analysis
-
-        run_quadrant_analysis(
-            f"{features_dir}/document_metrics.parquet",
-            figures_dir
-        )
+        if start_stage <= 9:
+            print("\n" + "="*70)
+            print("STAGE 9: Company Quadrant Analysis")
+            print("="*70)
+    
+            from src.analysis.company_quadrants import run_quadrant_analysis
+    
+            run_quadrant_analysis(
+                f"{features_dir}/document_metrics.parquet",
+                figures_dir
+            )
 
         # =========================================================================
         # Stage 10: Regression Analysis
         # =========================================================================
-        print("\n" + "="*70)
-        print("STAGE 10: Regression Analysis")
-        print("="*70)
-
-        from src.analysis.regression import run_regression_analysis
-
-        run_regression_analysis(
-            f"{features_dir}/initiation_scores.parquet",
-            f"{features_dir}/document_metrics.parquet",
-            wrds_path,
-            figures_dir
-        )
+        if start_stage <= 10:
+            print("\n" + "="*70)
+            print("STAGE 10: Regression Analysis")
+            print("="*70)
+    
+            from src.analysis.regression import run_regression_analysis
+    
+            run_regression_analysis(
+                f"{features_dir}/initiation_scores.parquet",
+                f"{features_dir}/document_metrics.parquet",
+                wrds_path,
+                figures_dir
+            )
 
         # =========================================================================
         # Stage 11: Benchmark Comparison (Baseline vs Models)
         # =========================================================================
-        if run_benchmark:
+        if start_stage <= 11 and run_benchmark:
             print("\n" + "="*70)
             print("STAGE 11: Benchmark Comparison")
             print("="*70)
@@ -347,13 +380,13 @@ def run_pipeline(
                 text_section=section,
                 verbose=True,
             )
-        else:
+        elif not run_benchmark:
             print("\n[Skipping benchmark comparison: run_benchmark=False]")
 
         # =========================================================================
         # Stage 12: Lasso Text Feature Analysis (Volcano + Coefficients)
         # =========================================================================
-        if run_lasso:
+        if start_stage <= 12 and run_lasso:
             print("\n" + "="*70)
             print("STAGE 12: Lasso Text Feature Analysis")
             print("="*70)
@@ -371,50 +404,51 @@ def run_pipeline(
                 cv=lasso_cv,
                 compute_cv_predictions=not lasso_skip_cv_pred,
             )
-        else:
+        elif not run_lasso:
             print("\n[Skipping Lasso text feature analysis: run_lasso=False]")
 
         # =========================================================================
         # Stage 13: Additional Visualizations (Rankings + Wordclouds)
         # =========================================================================
-        print("\n" + "="*70)
-        print("STAGE 13: Additional Visualizations")
-        print("="*70)
-
-        from src.analysis.company_rankings import run_company_ranking_analysis
-        from src.analysis.industry_rankings import run_industry_analysis
-        from src.analysis.ai_wordclouds import run_ai_wordclouds
-
-        run_company_ranking_analysis(
-            f"{features_dir}/document_metrics.parquet",
-            figures_dir,
-            start_year=2020,
-            end_year=2025
-        )
-
-        run_industry_analysis(
-            doc_metrics_path=f"{features_dir}/document_metrics.parquet",
-            final_dataset_path=input_dataset,
-            output_dir=figures_dir,
-            start_year=2020,
-            end_year=2025,
-            top_n=100
-        )
-
-        wordcloud_sample = dev_sample * 50 if dev_mode else None
-        wordcloud_input = f"{features_dir}/sentences_with_keywords.parquet"
-        run_ai_wordclouds(
-            wordcloud_input,
-            figures_dir,
-            start_year=2020,
-            end_year=2025,
-            sample_n=wordcloud_sample
-        )
+        if start_stage <= 13:
+            print("\n" + "="*70)
+            print("STAGE 13: Additional Visualizations")
+            print("="*70)
+    
+            from src.analysis.company_rankings import run_company_ranking_analysis
+            from src.analysis.industry_rankings import run_industry_analysis
+            from src.analysis.ai_wordclouds import run_ai_wordclouds
+    
+            run_company_ranking_analysis(
+                f"{features_dir}/document_metrics.parquet",
+                figures_dir,
+                start_year=2020,
+                end_year=2025
+            )
+    
+            run_industry_analysis(
+                doc_metrics_path=f"{features_dir}/document_metrics.parquet",
+                final_dataset_path=input_dataset,
+                output_dir=figures_dir,
+                start_year=2020,
+                end_year=2025,
+                top_n=100
+            )
+    
+            wordcloud_sample = dev_sample * 50 if dev_mode else None
+            wordcloud_input = f"{features_dir}/sentences_with_keywords.parquet"
+            run_ai_wordclouds(
+                wordcloud_input,
+                figures_dir,
+                start_year=2020,
+                end_year=2025,
+                sample_n=wordcloud_sample
+            )
 
         # =========================================================================
         # Stage 14: Research-Grade Report (Econometric + Model + Cases)
         # =========================================================================
-        if run_research_report:
+        if start_stage <= 14 and run_research_report:
             print("\n" + "=" * 70)
             print("STAGE 14: Research-Grade Report")
             print("=" * 70)
@@ -432,7 +466,7 @@ def run_pipeline(
                 model_target=research_target,
                 test_quarters=research_test_quarters,
             )
-        else:
+        elif not run_research_report:
             print("\n[Skipping research-grade report stage: run_research_report=False]")
 
         # =========================================================================
@@ -467,6 +501,7 @@ def run_pipeline(
             "ai_method": ai_method,
             "kw_workers": kw_workers,
             "metrics_workers": metrics_workers,
+            "run_download": run_download,
             "run_lasso": run_lasso,
             "run_benchmark": run_benchmark,
             "run_eda_foundation": run_eda_foundation,
@@ -516,12 +551,16 @@ if __name__ == "__main__":
         description="S&P 500 AI Narrative Text Mining Pipeline"
     )
     
-    parser.add_argument("--input", default="final_dataset.parquet",
+    parser.add_argument("--input", default="data/final_dataset.parquet",
                        help="Input earnings call dataset")
-    parser.add_argument("--wrds", default="Sp500_meta_data.csv",
+    parser.add_argument("--wrds", default="data/wrds.csv",
                        help="WRDS financial metadata")
     parser.add_argument("--output-dir", default="outputs",
                        help="Output directory")
+    parser.add_argument("--data-dir", default="data",
+                       help="Data directory for downloaded dataset")
+    parser.add_argument("--run-download", action="store_true",
+                       help="Run Stage 0: Data download and process from HuggingFace/WRDS")
     parser.add_argument("--dev", action="store_true",
                        help="Development mode (small samples)")
     parser.add_argument("--dev-sample", type=int, default=100,
@@ -554,6 +593,8 @@ if __name__ == "__main__":
                        help="Benchmark text model mode: ratio features or raw TF-IDF text")
     parser.add_argument("--benchmark-text-section", default="qa", choices=["qa", "speech", "all"],
                        help="Section to use for raw-text benchmark mode")
+    parser.add_argument("--start-stage", type=int, default=0,
+                       help="Stage to start execution from (0-14)")
     parser.add_argument("--skip-research-report", action="store_true",
                        help="Skip research-grade report stage")
     parser.add_argument("--report-output-dir", default=None,
@@ -569,6 +610,7 @@ if __name__ == "__main__":
         input_dataset=args.input,
         wrds_path=args.wrds,
         output_dir=args.output_dir,
+        data_dir=args.data_dir,
         dev_mode=args.dev,
         dev_sample=args.dev_sample,
         seed=args.seed,
@@ -581,6 +623,7 @@ if __name__ == "__main__":
         lasso_ngram_max=args.lasso_ngram_max,
         lasso_cv=args.lasso_cv,
         lasso_skip_cv_pred=args.lasso_skip_cv_pred,
+        run_download=args.run_download,
         run_benchmark=not args.skip_benchmark,
         benchmark_cv_folds=args.benchmark_cv_folds,
         benchmark_text_model=args.benchmark_text_model,
@@ -589,4 +632,5 @@ if __name__ == "__main__":
         report_output_dir=args.report_output_dir,
         research_target=args.research_target,
         research_test_quarters=args.research_test_quarters,
+        start_stage=args.start_stage,
     )

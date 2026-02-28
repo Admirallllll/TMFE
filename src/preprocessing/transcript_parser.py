@@ -882,11 +882,11 @@ def process_dataset(
     return parsed_df
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     import argparse
     
-    parser = argparse.ArgumentParser(description="Parse earnings call transcripts")
-    parser.add_argument("--input", default="final_dataset.parquet", help="Input file path")
+    parser = argparse.ArgumentParser(description="Parse earnings call transcripts into speech and Q&A blocks.")
+    parser.add_argument("--input", default="data/final_dataset.parquet", help="Input file path")
     parser.add_argument("--output", default="outputs/features/parsed_transcripts.parquet", help="Output file path")
     parser.add_argument("--sample", type=int, default=None, help="Number of samples for testing")
     
