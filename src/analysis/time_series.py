@@ -11,6 +11,20 @@ from typing import Optional, Dict
 from datetime import datetime
 import os
 
+try:
+    from src.utils.visual_style import SPOTIFY_COLORS, apply_spotify_theme, save_figure, style_axes, style_legend
+except Exception:  # pragma: no cover
+    SPOTIFY_COLORS = {"background": "#121212", "blue": "#4EA1FF", "negative": "#FF5A5F", "accent": "#1DB954"}
+    def apply_spotify_theme():
+        return None
+    def style_axes(ax, **kwargs):
+        return ax
+    def style_legend(ax):
+        return ax.get_legend()
+    def save_figure(fig, output_path: str, dpi: int = 150):
+        fig.savefig(output_path, dpi=dpi, bbox_inches="tight")
+        plt.close(fig)
+
 
 def prepare_time_series_data(
     doc_metrics_df: pd.DataFrame,
@@ -119,7 +133,9 @@ def plot_ai_trends(
         output_path: Path to save figure
         title: Plot title
     """
+    apply_spotify_theme()
     fig, axes = plt.subplots(1, 1, figsize=(14, 6))
+    fig.patch.set_facecolor(SPOTIFY_COLORS.get("background", "#121212"))
     
     # Sort by time
     trend_df = trend_df.sort_values('year_quarter')
@@ -127,8 +143,8 @@ def plot_ai_trends(
     
     # Plot: Dictionary-based AI intensity
     ax1 = axes
-    ax1.plot(x, trend_df['speech_kw_ai_ratio_mean'], 'b-o', label='Speech AI Intensity', linewidth=2)
-    ax1.plot(x, trend_df['qa_kw_ai_ratio_mean'], 'r-s', label='Q&A AI Intensity', linewidth=2)
+    ax1.plot(x, trend_df['speech_kw_ai_ratio_mean'], '-o', label='Speech AI Intensity', linewidth=2, color=SPOTIFY_COLORS.get("blue", "#4EA1FF"))
+    ax1.plot(x, trend_df['qa_kw_ai_ratio_mean'], '-s', label='Q&A AI Intensity', linewidth=2, color=SPOTIFY_COLORS.get("negative", "#FF5A5F"))
     
     # Add ChatGPT release marker (Nov 2022 = 2022Q4)
     chatgpt_idx = None
@@ -138,7 +154,7 @@ def plot_ai_trends(
             break
     
     if chatgpt_idx is not None:
-        ax1.axvline(x=chatgpt_idx, color='green', linestyle='--', alpha=0.7, label='ChatGPT Release (Nov 2022)')
+        ax1.axvline(x=chatgpt_idx, color=SPOTIFY_COLORS.get("accent", "#1DB954"), linestyle='--', alpha=0.8, label='ChatGPT Release (Nov 2022)')
     
     ax1.set_xlabel('Quarter')
     ax1.set_ylabel('AI Intensity (% of sentences)')
@@ -146,11 +162,11 @@ def plot_ai_trends(
     ax1.set_xticks(x[::2])
     ax1.set_xticklabels(trend_df['year_quarter'].iloc[::2], rotation=45, ha='right')
     ax1.legend()
-    ax1.grid(True, alpha=0.3)
+    style_axes(ax1, grid_axis="y", grid_alpha=0.08)
+    style_legend(ax1)
     
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
-    plt.close()
+    fig.tight_layout()
+    save_figure(fig, output_path, dpi=180)
     print(f"Saved trend plot to {output_path}")
 
 

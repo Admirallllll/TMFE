@@ -20,6 +20,7 @@ def _make_synthetic_regression_df() -> pd.DataFrame:
                     "doc_id": doc_id,
                     "ticker": ticker,
                     "ai_initiation_score": y,
+                    "total_ai_exchanges": 2,
                     "log_mktcap": 10 + t_idx,
                     "rd_intensity": 0.01 * (q + t_idx),
                     "eps_positive": int((t_idx + q) % 2 == 0),
@@ -77,6 +78,7 @@ def test_evaluate_benchmark_models_uses_group_splits_and_models_differ():
     assert set(["Fold", "Model", "MAE", "RMSE", "Kendall Tau", "n_train", "n_test"]).issubset(folds_df.columns)
     assert set(["Model", "MAE_mean", "MAE_std", "RMSE_mean", "RMSE_std", "Kendall Tau_mean", "Kendall Tau_std"]).issubset(summary_df.columns)
     assert folds_df["Model"].nunique() >= 3
+    assert "Text TF-IDF Lasso" in set(folds_df["Model"])
 
     # Same split sizes across models within each fold (shared evaluation split).
     sizes_per_fold = folds_df.groupby("Fold")["n_test"].nunique()
@@ -90,6 +92,10 @@ def test_evaluate_benchmark_models_uses_group_splits_and_models_differ():
     mean_mae = summary_df.loc[summary_df["Model"] == "Mean Baseline", "MAE_mean"].iloc[0]
     best_non_mean = summary_df.loc[summary_df["Model"] != "Mean Baseline", "MAE_mean"].min()
     assert best_non_mean < mean_mae
+
+    # Summary ordering should prioritize Kendall Tau first.
+    taus = summary_df["Kendall Tau_mean"].to_numpy()
+    assert (taus[:-1] >= taus[1:] - 1e-12).all()
 
 
 def test_write_benchmark_outputs_writes_flat_summary_csv(tmp_path):
@@ -113,3 +119,25 @@ def test_write_benchmark_outputs_writes_flat_summary_csv(tmp_path):
     assert not saved_summary["Model"].isna().any()
     assert "MAE_mean" in saved_summary.columns
     assert "Kendall Tau_mean" in saved_summary.columns
+
+
+def test_evaluate_benchmark_filters_no_ai_rows_for_initiation():
+    reg_df = _make_synthetic_regression_df()
+    reg_df.loc[:3, "total_ai_exchanges"] = 0
+    sentences_df = _make_synthetic_sentences_df(reg_df)
+
+    folds_df, _ = evaluate_benchmark_models(
+        regression_df=reg_df,
+        sentences_df=sentences_df,
+        target_col="ai_initiation_score",
+        n_splits=3,
+        random_state=42,
+        text_model_mode="ratios",
+        verbose=False,
+    )
+    assert "Text-Ratio Lasso" in set(folds_df["Model"])
+
+    # Each fold's train+test size should reflect the filtered dataset.
+    expected_n = int((reg_df["total_ai_exchanges"] > 0).sum())
+    first_fold = folds_df.iloc[0]
+    assert int(first_fold["n_train"] + first_fold["n_test"]) == expected_n

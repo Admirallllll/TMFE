@@ -10,8 +10,10 @@ Stages (ai_method dependent):
 4. Topic modeling per quarter (topic only)
 5. Compute AI intensity metrics + visualizations
 6. Compute initiation scores + visualizations
-7. Run analyses (time series, quadrants, regression)
-8. Additional visualizations (company rankings, wordclouds)
+7. Foundational EDA (funnel + zero-inflation visuals)
+8. Run analyses (time series, quadrants, regression)
+9. Benchmark comparison
+10. Additional visualizations (company rankings, wordclouds)
 """
 
 import os
@@ -63,6 +65,11 @@ def run_pipeline(
     lasso_ngram_max: int = 2,
     lasso_cv: int = 5,
     lasso_skip_cv_pred: bool = False,
+    run_benchmark: bool = True,
+    run_eda_foundation: bool = True,
+    benchmark_cv_folds: int = 5,
+    benchmark_text_model: str = "ratios",
+    benchmark_text_section: str = "qa",
 ):
     """
     Run the full pipeline.
@@ -245,10 +252,32 @@ def run_pipeline(
         compute_all_initiation_metrics(sentences_for_metrics, features_dir, figures_dir)
 
         # =========================================================================
-        # Stage 7: Analysis - Time Series
+        # Stage 7: Foundational EDA (Funnel + Sparsity Visuals)
+        # =========================================================================
+        eda_foundation_outputs = None
+        if run_eda_foundation:
+            print("\n" + "="*70)
+            print("STAGE 7: Foundational EDA")
+            print("="*70)
+
+            from src.analysis.eda_foundation import run_eda_foundation as run_eda_foundation_stage
+
+            eda_foundation_outputs = run_eda_foundation_stage(
+                sentences_path=f"{features_dir}/sentences.parquet",
+                document_metrics_path=f"{features_dir}/document_metrics.parquet",
+                initiation_scores_path=f"{features_dir}/initiation_scores.parquet",
+                parsed_transcripts_path=f"{features_dir}/parsed_transcripts.parquet",
+                figure_dir=os.path.join(figures_dir, "eda"),
+                report_dir=os.path.join(output_dir, "reports", "eda"),
+            )
+        else:
+            print("\n[Skipping foundational EDA stage: run_eda_foundation=False]")
+
+        # =========================================================================
+        # Stage 8: Analysis - Time Series
         # =========================================================================
         print("\n" + "="*70)
-        print("STAGE 7: Time Series Analysis")
+        print("STAGE 8: Time Series Analysis")
         print("="*70)
 
         from src.analysis.time_series import run_time_series_analysis
@@ -260,10 +289,10 @@ def run_pipeline(
         )
 
         # =========================================================================
-        # Stage 8: Analysis - Company Quadrants
+        # Stage 9: Analysis - Company Quadrants
         # =========================================================================
         print("\n" + "="*70)
-        print("STAGE 8: Company Quadrant Analysis")
+        print("STAGE 9: Company Quadrant Analysis")
         print("="*70)
 
         from src.analysis.company_quadrants import run_quadrant_analysis
@@ -274,10 +303,10 @@ def run_pipeline(
         )
 
         # =========================================================================
-        # Stage 9: Regression Analysis
+        # Stage 10: Regression Analysis
         # =========================================================================
         print("\n" + "="*70)
-        print("STAGE 9: Regression Analysis")
+        print("STAGE 10: Regression Analysis")
         print("="*70)
 
         from src.analysis.regression import run_regression_analysis
@@ -290,11 +319,35 @@ def run_pipeline(
         )
 
         # =========================================================================
-        # Stage 10: Lasso Text Feature Analysis (Volcano + Coefficients)
+        # Stage 11: Benchmark Comparison (Baseline vs Models)
+        # =========================================================================
+        benchmark_outputs = None
+        if run_benchmark:
+            print("\n" + "="*70)
+            print("STAGE 11: Benchmark Comparison")
+            print("="*70)
+
+            from src.analysis.benchmark_comparison import run_benchmark_comparison
+
+            section = None if str(benchmark_text_section).lower() == "all" else benchmark_text_section
+            benchmark_outputs = run_benchmark_comparison(
+                regression_dataset_path=f"{features_dir}/regression_dataset.parquet",
+                sentences_path=f"{features_dir}/sentences_with_keywords.parquet",
+                output_dir=figures_dir,
+                n_splits=benchmark_cv_folds,
+                text_model_mode=benchmark_text_model,
+                text_section=section,
+                verbose=True,
+            )
+        else:
+            print("\n[Skipping benchmark comparison: run_benchmark=False]")
+
+        # =========================================================================
+        # Stage 12: Lasso Text Feature Analysis (Volcano + Coefficients)
         # =========================================================================
         if run_lasso:
             print("\n" + "="*70)
-            print("STAGE 10: Lasso Text Feature Analysis")
+            print("STAGE 12: Lasso Text Feature Analysis")
             print("="*70)
 
             from src.analysis.lasso_text_features import run_lasso_text_analysis
@@ -314,10 +367,10 @@ def run_pipeline(
             print("\n[Skipping Lasso text feature analysis: run_lasso=False]")
 
         # =========================================================================
-        # Stage 11: Additional Visualizations (Rankings + Wordclouds)
+        # Stage 13: Additional Visualizations (Rankings + Wordclouds)
         # =========================================================================
         print("\n" + "="*70)
-        print("STAGE 11: Additional Visualizations")
+        print("STAGE 13: Additional Visualizations")
         print("="*70)
 
         from src.analysis.company_rankings import run_company_ranking_analysis
@@ -383,6 +436,11 @@ def run_pipeline(
             "kw_workers": kw_workers,
             "metrics_workers": metrics_workers,
             "run_lasso": run_lasso,
+            "run_benchmark": run_benchmark,
+            "run_eda_foundation": run_eda_foundation,
+            "benchmark_cv_folds": benchmark_cv_folds if run_benchmark else None,
+            "benchmark_text_model": benchmark_text_model if run_benchmark else None,
+            "benchmark_text_section": benchmark_text_section if run_benchmark else None,
             "lasso_max_features": lasso_max_features if run_lasso else None,
             "lasso_ngram_max": lasso_ngram_max if run_lasso else None,
             "lasso_cv": lasso_cv if run_lasso else None,
@@ -400,6 +458,8 @@ def run_pipeline(
             "outputs": {
                 "features_dir": features_dir,
                 "figures_dir": figures_dir,
+                "eda_foundation_outputs": eda_foundation_outputs,
+                "benchmark_outputs": benchmark_outputs,
             },
         }
 
@@ -447,6 +507,16 @@ if __name__ == "__main__":
                        help="Cross-validation folds for LassoCV")
     parser.add_argument("--lasso-skip-cv-pred", action="store_true",
                        help="Skip outer CV predictions/Kendall Tau scatter in Lasso stage for faster runs")
+    parser.add_argument("--skip-benchmark", action="store_true",
+                       help="Skip benchmark comparison stage")
+    parser.add_argument("--skip-eda-foundation", action="store_true",
+                       help="Skip foundational EDA stage (funnel + zero-inflation visuals)")
+    parser.add_argument("--benchmark-cv-folds", type=int, default=5,
+                       help="CV folds for benchmark comparison")
+    parser.add_argument("--benchmark-text-model", default="ratios", choices=["ratios", "raw"],
+                       help="Benchmark text model mode: ratio features or raw TF-IDF text")
+    parser.add_argument("--benchmark-text-section", default="qa", choices=["qa", "speech", "all"],
+                       help="Section to use for raw-text benchmark mode")
     
     args = parser.parse_args()
     
@@ -461,8 +531,13 @@ if __name__ == "__main__":
         kw_workers=args.kw_workers,
         metrics_workers=args.metrics_workers,
         run_lasso=not args.skip_lasso,
+        run_eda_foundation=not args.skip_eda_foundation,
         lasso_max_features=args.lasso_max_features,
         lasso_ngram_max=args.lasso_ngram_max,
         lasso_cv=args.lasso_cv,
         lasso_skip_cv_pred=args.lasso_skip_cv_pred,
+        run_benchmark=not args.skip_benchmark,
+        benchmark_cv_folds=args.benchmark_cv_folds,
+        benchmark_text_model=args.benchmark_text_model,
+        benchmark_text_section=args.benchmark_text_section,
     )

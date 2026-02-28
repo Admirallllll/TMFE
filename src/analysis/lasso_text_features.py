@@ -28,14 +28,95 @@ import numpy as np
 import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import Lasso, LassoCV
-from sklearn.model_selection import cross_val_predict
+from sklearn.model_selection import KFold, cross_val_predict
+from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from scipy.stats import kendalltau
+
+try:
+    from src.utils.visual_style import (
+        SPOTIFY_COLORS,
+        apply_spotify_theme,
+        save_figure,
+        style_axes,
+        style_legend,
+    )
+except Exception:  # pragma: no cover
+    SPOTIFY_COLORS = {
+        "background": "#121212",
+        "fg": "#F5F5F5",
+        "muted": "#B3B3B3",
+        "accent": "#1DB954",
+        "negative": "#FF5A5F",
+        "grid": "#2A2A2A",
+        "blue": "#4EA1FF",
+    }
+    def apply_spotify_theme():
+        return None
+    def style_axes(ax, **kwargs):
+        return ax
+    def style_legend(ax):
+        return ax.get_legend()
+    def save_figure(fig, output_path: str, dpi: int = 150):
+        fig.savefig(output_path, dpi=dpi, bbox_inches="tight")
+        plt.close(fig)
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+DEFAULT_TFIDF_MIN_DF = 0.01
+DEFAULT_TFIDF_MAX_DF = 0.80
+DEFAULT_LASSO_INNER_CV = 3
+DEFAULT_LASSO_N_ALPHAS = 50
+DEFAULT_LASSO_MAX_ITER = 1000
+DEFAULT_LASSO_TOL = 1e-3
+DEFAULT_MODEL_N_JOBS = -1
+
+
+def _build_lasso_text_pipeline(
+    inner_cv: int,
+    max_features: int,
+    ngram_range: Tuple[int, int],
+    random_state: int,
+    tfidf_min_df: float = DEFAULT_TFIDF_MIN_DF,
+    tfidf_max_df: float = DEFAULT_TFIDF_MAX_DF,
+    lasso_n_alphas: int = DEFAULT_LASSO_N_ALPHAS,
+    lasso_max_iter: int = DEFAULT_LASSO_MAX_ITER,
+    lasso_tol: float = DEFAULT_LASSO_TOL,
+    lasso_n_jobs: int = DEFAULT_MODEL_N_JOBS,
+) -> Pipeline:
+    """Build a sparse-safe TF-IDF -> scaler -> LassoCV pipeline."""
+    return Pipeline(
+        steps=[
+            (
+                "tfidf",
+                TfidfVectorizer(
+                    max_features=max_features,
+                    ngram_range=ngram_range,
+                    sublinear_tf=True,
+                    min_df=tfidf_min_df,
+                    max_df=tfidf_max_df,
+                ),
+            ),
+            # Preserve sparsity; centering would densify the TF-IDF matrix and explode RAM.
+            ("scaler", StandardScaler(with_mean=False)),
+            (
+                "lasso",
+                LassoCV(
+                    cv=inner_cv,
+                    random_state=random_state,
+                    n_alphas=lasso_n_alphas,
+                    max_iter=lasso_max_iter,
+                    tol=lasso_tol,
+                    n_jobs=lasso_n_jobs,
+                    verbose=0,
+                ),
+            ),
+        ]
+    )
+
 
 def _parse_doc_id(doc_id: str) -> Tuple[Optional[str], Optional[int], Optional[int]]:
     """Extract ticker, year, quarter from doc_id like 'AAPL_2023Q1'."""
@@ -92,6 +173,8 @@ def _precompute_corpus_features(
     doc_id_col: str = "doc_id",
     max_features: int = 5000,
     ngram_range: Tuple[int, int] = (1, 2),
+    min_df: float = DEFAULT_TFIDF_MIN_DF,
+    max_df: float = DEFAULT_TFIDF_MAX_DF,
 ) -> Dict:
     """
     Fit TF-IDF and scaling once for a corpus, then reuse across multiple targets.
@@ -103,8 +186,8 @@ def _precompute_corpus_features(
         max_features=max_features,
         ngram_range=ngram_range,
         sublinear_tf=True,
-        min_df=3,
-        max_df=0.95,
+        min_df=min_df,
+        max_df=max_df,
     )
     X = vectorizer.fit_transform(base[text_col].tolist())
 
@@ -143,6 +226,14 @@ def fit_lasso_ngram(
     random_state: int = 42,
     precomputed_features: Optional[Dict] = None,
     compute_cv_predictions: bool = True,
+    tfidf_min_df: float = DEFAULT_TFIDF_MIN_DF,
+    tfidf_max_df: float = DEFAULT_TFIDF_MAX_DF,
+    lasso_inner_cv: int = DEFAULT_LASSO_INNER_CV,
+    lasso_n_alphas: int = DEFAULT_LASSO_N_ALPHAS,
+    lasso_max_iter: int = DEFAULT_LASSO_MAX_ITER,
+    lasso_tol: float = DEFAULT_LASSO_TOL,
+    lasso_n_jobs: int = DEFAULT_MODEL_N_JOBS,
+    oof_n_jobs: int = DEFAULT_MODEL_N_JOBS,
 ) -> Dict:
     """
     Fit a TF-IDF → LassoCV pipeline predicting *target_col* from text.
@@ -159,73 +250,129 @@ def fit_lasso_ngram(
         dict with keys: 'coef_df', 'vectorizer', 'lasso', 'y_true', 'y_pred',
                         'alpha', 'r2', 'kendall_tau', 'kendall_p'
     """
-    if precomputed_features is not None:
-        doc_lookup = precomputed_features["doc_lookup"]
-        merged = doc_lookup.merge(
-            target_df[[doc_id_col, target_col]].dropna(),
-            on=doc_id_col,
-            how="inner",
-        )
-    else:
-        merged = corpus_df[[doc_id_col, text_col]].merge(
-            target_df[[doc_id_col, target_col]].dropna(), on=doc_id_col, how="inner"
-        )
+    # Keep API compatibility: precomputed_features may still be supplied by callers,
+    # but OOF evaluation intentionally uses raw text + fold-local preprocessing to
+    # avoid leakage. Final coefficient extraction is also fit on the merged corpus.
+    merged = corpus_df[[doc_id_col, text_col]].merge(
+        target_df[[doc_id_col, target_col]].dropna(), on=doc_id_col, how="inner"
+    )
     if len(merged) < 30:
         print(f"[Lasso] Insufficient data for '{target_col}': only {len(merged)} documents.")
         return {}
 
-    y = merged[target_col].values
+    merged[text_col] = merged[text_col].fillna("").astype(str)
+    texts = merged[text_col].tolist()
+    y = merged[target_col].to_numpy(dtype=float)
 
-    if precomputed_features is not None:
-        row_idx = merged["_row_idx"].to_numpy(dtype=np.int32)
-        X_scaled = precomputed_features["X_scaled"][row_idx]
-        vectorizer = precomputed_features["vectorizer"]
-        X_bin = (X_scaled > 0).astype(np.int8)
-        doc_freq = _doc_frequencies(vectorizer, X_bin)
-    else:
-        texts = merged[text_col].fillna("").astype(str).tolist()
-
-        # Vectorize
-        vectorizer = TfidfVectorizer(
-            max_features=max_features,
-            ngram_range=ngram_range,
-            sublinear_tf=True,
-            min_df=3,
-            max_df=0.95,
-        )
-        X = vectorizer.fit_transform(texts)
-
-        # Binary matrix for document-frequency computation
-        X_bin = (X > 0).astype(np.int8)
-        doc_freq = _doc_frequencies(vectorizer, X_bin)
-
-        # Features already normalized by TF-IDF; apply variance scaling only.
-        scaler = StandardScaler(with_mean=False)
-        X_scaled = scaler.fit_transform(X)
-
-    print(f"  Training LassoCV on {X_scaled.shape[0]} samples x {X_scaled.shape[1]} features...")
-    # n_jobs=-1 sometimes causes deadlocks with huge matrices on Macs.
-    # Set n_jobs=2 or 1 if it hangs. verbose=1 shows progress.
-    lasso = LassoCV(cv=cv, random_state=random_state, max_iter=2000, n_jobs=2, verbose=1)
-    lasso.fit(X_scaled, y)
-
-    alpha = lasso.alpha_
-    r2 = lasso.score(X_scaled, y)
-
-    # Cross-validated predictions for Kendall Tau
+    # Cross-validated out-of-fold predictions for unbiased Kendall Tau
     y_pred = None
     tau = None
     p_val = None
+    r2_oof = None
     if compute_cv_predictions:
-        print("  Calculating cross-validated predictions for Kendall Tau...")
-        # Use a fixed-alpha Lasso in the outer CV loop to avoid nested LassoCV search.
-        y_pred = cross_val_predict(
-            Lasso(alpha=alpha, max_iter=2000),
-            X_scaled,
-            y,
-            cv=cv,
+        n_outer = min(max(2, int(cv)), len(y))
+        if n_outer >= 2:
+            print(
+                "  Calculating leakage-free OOF predictions for Kendall Tau "
+                "(nested TF-IDF/scaler/LassoCV, parallel outer CV)..."
+            )
+            splitter = KFold(n_splits=n_outer, shuffle=True, random_state=random_state)
+            splits = list(splitter.split(texts))
+            min_train_size = min((len(train_idx) for train_idx, _ in splits), default=0)
+            inner_cv_oof = min(max(2, int(lasso_inner_cv)), min_train_size)
+
+            if inner_cv_oof < 2:
+                y_pred = np.full(len(y), float(np.mean(y)), dtype=float)
+            else:
+                text_array = np.asarray(texts, dtype=object)
+                try:
+                    oof_estimator = _build_lasso_text_pipeline(
+                        inner_cv=inner_cv_oof,
+                        max_features=max_features,
+                        ngram_range=ngram_range,
+                        random_state=random_state,
+                        tfidf_min_df=tfidf_min_df,
+                        tfidf_max_df=tfidf_max_df,
+                        lasso_n_alphas=lasso_n_alphas,
+                        lasso_max_iter=lasso_max_iter,
+                        lasso_tol=lasso_tol,
+                        lasso_n_jobs=lasso_n_jobs,
+                    )
+                    y_pred = cross_val_predict(
+                        oof_estimator,
+                        text_array,
+                        y,
+                        cv=splits,
+                        method="predict",
+                        n_jobs=oof_n_jobs,
+                    )
+                except Exception:
+                    # Fallback keeps OOF evaluation robust if a fold has an empty vocabulary.
+                    y_pred = np.full(len(y), np.nan, dtype=float)
+                    for fold_idx, (train_idx, test_idx) in enumerate(splits, start=1):
+                        train_text = [texts[i] for i in train_idx]
+                        test_text = [texts[i] for i in test_idx]
+                        y_train = y[train_idx]
+                        inner_cv_fold = min(max(2, int(lasso_inner_cv)), len(train_idx))
+                        if inner_cv_fold < 2:
+                            y_pred[test_idx] = float(np.mean(y_train))
+                            continue
+                        try:
+                            pipe = _build_lasso_text_pipeline(
+                                inner_cv=inner_cv_fold,
+                                max_features=max_features,
+                                ngram_range=ngram_range,
+                                random_state=random_state,
+                                tfidf_min_df=tfidf_min_df,
+                                tfidf_max_df=tfidf_max_df,
+                                lasso_n_alphas=lasso_n_alphas,
+                                lasso_max_iter=lasso_max_iter,
+                                lasso_tol=lasso_tol,
+                                lasso_n_jobs=lasso_n_jobs,
+                            )
+                            pipe.fit(train_text, y_train)
+                            y_pred[test_idx] = pipe.predict(test_text)
+                        except Exception:
+                            y_pred[test_idx] = float(np.mean(y_train))
+                        if fold_idx == 1 and len(test_idx) > 0:
+                            # Keep a lightweight progress trace for long runs.
+                            print(f"    Fold {fold_idx}/{n_outer}: train={len(train_idx)} test={len(test_idx)}")
+            valid = ~np.isnan(y_pred)
+            if valid.sum() >= 2:
+                tau, p_val = kendalltau(y[valid], y_pred[valid])
+                ss_res = float(np.sum((y[valid] - y_pred[valid]) ** 2))
+                ss_tot = float(np.sum((y[valid] - np.mean(y[valid])) ** 2))
+                r2_oof = (1.0 - ss_res / ss_tot) if ss_tot > 0 else np.nan
+
+    # Final full-sample fit for coefficient interpretation (not for OOF evaluation).
+    try:
+        final_inner_cv = min(max(2, int(lasso_inner_cv)), len(y))
+        final_pipe = _build_lasso_text_pipeline(
+            inner_cv=final_inner_cv,
+            max_features=max_features,
+            ngram_range=ngram_range,
+            random_state=random_state,
+            tfidf_min_df=tfidf_min_df,
+            tfidf_max_df=tfidf_max_df,
+            lasso_n_alphas=lasso_n_alphas,
+            lasso_max_iter=lasso_max_iter,
+            lasso_tol=lasso_tol,
+            lasso_n_jobs=lasso_n_jobs,
         )
-        tau, p_val = kendalltau(y, y_pred)
+        final_pipe.fit(texts, y)
+        vectorizer = final_pipe.named_steps["tfidf"]
+        scaler = final_pipe.named_steps["scaler"]
+        lasso = final_pipe.named_steps["lasso"]
+        X = vectorizer.transform(texts)
+        X_scaled = scaler.transform(X)
+        X_bin = (X > 0).astype(np.int8)
+        doc_freq = _doc_frequencies(vectorizer, X_bin)
+        r2 = float(final_pipe.score(texts, y))
+        alpha = float(getattr(lasso, "alpha_", getattr(lasso, "alpha", np.nan)))
+        print(f"  Training final LassoCV pipeline on {X_scaled.shape[0]} samples x {X_scaled.shape[1]} features...")
+    except ValueError as e:
+        print(f"[Lasso] Could not fit final pipeline for '{target_col}': {e}")
+        return {}
 
     # Build coefficient DataFrame
     feature_names = vectorizer.get_feature_names_out()
@@ -243,9 +390,11 @@ def fit_lasso_ngram(
     print(f"\n[Lasso → {target_col}]")
     print(f"  Alpha (best):   {alpha:.6f}")
     print(f"  R² (train):     {r2:.4f}")
+    if r2_oof is not None:
+        print(f"  R² (OOF):       {r2_oof:.4f}")
     tau_str = f"{tau:.4f}" if tau is not None else "skipped"
     p_str = f"{p_val:.4f}" if p_val is not None else "skipped"
-    print(f"  Kendall's Tau:  {tau_str}  (p={p_str})")
+    print(f"  Kendall's Tau (OOF):  {tau_str}  (p={p_str})")
     print(f"  Non-zero coefs: {(coefs != 0).sum()} / {len(coefs)}")
 
     if len(coef_df) > 0:
@@ -262,7 +411,10 @@ def fit_lasso_ngram(
         "y_pred": y_pred,
         "alpha": alpha,
         "r2": r2,
+        "r2_train": r2,
+        "r2_oof": r2_oof,
         "kendall_tau": tau,
+        "kendall_tau_oof": tau,
         "kendall_p": p_val,
         "target_col": target_col,
         "n_docs": len(merged),
@@ -291,9 +443,12 @@ def plot_volcano(
     if coef_df is None or len(coef_df) == 0:
         print("No non-zero coefficients to plot.")
         return
+    apply_spotify_theme()
 
     df = coef_df.copy()
-    df["color"] = df["coefficient"].apply(lambda c: "seagreen" if c > 0 else "crimson")
+    df["color"] = df["coefficient"].apply(
+        lambda c: SPOTIFY_COLORS.get("accent", "#1DB954") if c > 0 else SPOTIFY_COLORS.get("negative", "#FF5A5F")
+    )
     df["abs_coef"] = df["coefficient"].abs()
 
     # Label the most impactful words on each side
@@ -302,12 +457,13 @@ def plot_volcano(
     to_label = pd.concat([pos, neg])
 
     fig, ax = plt.subplots(figsize=(11, 7))
+    fig.patch.set_facecolor(SPOTIFY_COLORS.get("background", "#121212"))
 
     ax.scatter(
         df["coefficient"],
         df["log_doc_frequency"],
         c=df["color"],
-        alpha=0.55,
+        alpha=0.65,
         s=30,
         linewidths=0,
     )
@@ -324,7 +480,7 @@ def plot_volcano(
             alpha=0.9,
         )
 
-    ax.axvline(0, color="black", linewidth=0.8, linestyle="--")
+    ax.axvline(0, color=SPOTIFY_COLORS.get("muted", "#B3B3B3"), linewidth=0.8, linestyle="--")
 
     ax.set_xlabel("Lasso Coefficient\n← Lower AI Initiation         Higher AI Initiation →", fontsize=11)
     ax.set_ylabel("log(Document Frequency + 1)", fontsize=11)
@@ -336,18 +492,18 @@ def plot_volcano(
     # Legend
     from matplotlib.lines import Line2D
     legend_elements = [
-        Line2D([0], [0], marker="o", color="w", markerfacecolor="seagreen",
+        Line2D([0], [0], marker="o", color="w", markerfacecolor=SPOTIFY_COLORS.get("accent", "#1DB954"),
                markersize=8, label="Increases AI Initiation"),
-        Line2D([0], [0], marker="o", color="w", markerfacecolor="crimson",
+        Line2D([0], [0], marker="o", color="w", markerfacecolor=SPOTIFY_COLORS.get("negative", "#FF5A5F"),
                markersize=8, label="Decreases AI Initiation"),
     ]
     ax.legend(handles=legend_elements, loc="upper left", fontsize=9)
-    ax.grid(True, alpha=0.2)
+    style_axes(ax, grid_axis="y", grid_alpha=0.10)
+    style_legend(ax)
 
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=150, bbox_inches="tight")
-    plt.close()
+    fig.tight_layout()
+    save_figure(fig, output_path, dpi=180)
     print(f"Saved Volcano Plot → {output_path}")
 
 
@@ -364,28 +520,32 @@ def plot_top_coefficients(
     if coef_df is None or len(coef_df) == 0:
         print("No coefficients to plot.")
         return
+    apply_spotify_theme()
 
     pos = coef_df.nlargest(top_n, "coefficient")
     neg = coef_df.nsmallest(top_n, "coefficient")
     combined = pd.concat([neg, pos]).drop_duplicates("feature")
     combined = combined.sort_values("coefficient")
 
-    colors = ["crimson" if c < 0 else "seagreen" for c in combined["coefficient"]]
+    colors = [
+        SPOTIFY_COLORS.get("negative", "#FF5A5F") if c < 0 else SPOTIFY_COLORS.get("accent", "#1DB954")
+        for c in combined["coefficient"]
+    ]
 
     fig, ax = plt.subplots(figsize=(10, max(6, len(combined) * 0.32)))
+    fig.patch.set_facecolor(SPOTIFY_COLORS.get("background", "#121212"))
     ax.barh(combined["feature"], combined["coefficient"], color=colors, alpha=0.8)
-    ax.axvline(0, color="black", linewidth=0.8)
+    ax.axvline(0, color=SPOTIFY_COLORS.get("muted", "#B3B3B3"), linewidth=0.8)
     ax.set_xlabel("Lasso Coefficient", fontsize=11)
     ax.set_title(
         f"Top ±{top_n} N-gram Features (Lasso)\nTarget: {target_col}",
         fontsize=13,
     )
-    ax.grid(True, axis="x", alpha=0.3)
+    style_axes(ax, grid_axis="x", grid_alpha=0.10)
 
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=150, bbox_inches="tight")
-    plt.close()
+    fig.tight_layout()
+    save_figure(fig, output_path, dpi=180)
     print(f"Saved coefficient plot → {output_path}")
 
 
@@ -397,11 +557,13 @@ def plot_actual_vs_predicted(
     tau: float = None,
 ) -> None:
     """Scatter plot of actual vs. cross-validated predicted values."""
+    apply_spotify_theme()
     fig, ax = plt.subplots(figsize=(7, 6))
-    ax.scatter(y_true, y_pred, alpha=0.45, s=25, color="steelblue")
+    fig.patch.set_facecolor(SPOTIFY_COLORS.get("background", "#121212"))
+    ax.scatter(y_true, y_pred, alpha=0.55, s=25, color=SPOTIFY_COLORS.get("blue", "#4EA1FF"))
 
     lims = [min(y_true.min(), y_pred.min()), max(y_true.max(), y_pred.max())]
-    ax.plot(lims, lims, "k--", linewidth=0.8, label="Perfect fit")
+    ax.plot(lims, lims, linestyle="--", linewidth=0.8, color=SPOTIFY_COLORS.get("muted", "#B3B3B3"), label="Perfect fit")
 
     tau_str = f"Kendall's τ = {tau:.3f}" if tau is not None else ""
     ax.set_xlabel("Actual", fontsize=11)
@@ -411,12 +573,12 @@ def plot_actual_vs_predicted(
         fontsize=12,
     )
     ax.legend(fontsize=9)
-    ax.grid(True, alpha=0.25)
+    style_axes(ax, grid_axis="both", grid_alpha=0.10)
+    style_legend(ax)
 
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=150, bbox_inches="tight")
-    plt.close()
+    fig.tight_layout()
+    save_figure(fig, output_path, dpi=180)
     print(f"Saved actual-vs-predicted plot → {output_path}")
 
 
@@ -512,8 +674,20 @@ def run_lasso_text_analysis(
     # Target 4: AI initiation score (management proactiveness)
     if initiation_scores_path and os.path.exists(initiation_scores_path):
         init_df = pd.read_parquet(initiation_scores_path)
-        if "ai_initiation_score" in init_df.columns and len(init_df) > 30:
-            targets.append(("ai_initiation_score", "full", init_df))
+        if "ai_initiation_score" in init_df.columns:
+            if "total_ai_exchanges" in init_df.columns:
+                before = len(init_df)
+                init_df = init_df[init_df["total_ai_exchanges"].fillna(0) > 0].copy()
+                removed = before - len(init_df)
+                print(
+                    f"Filtering initiation target to active AI exchanges only: "
+                    f"removed {removed}, remaining {len(init_df)}"
+                )
+            if len(init_df) > 30:
+                # Target is defined from Q&A exchanges; use the Q&A corpus for alignment.
+                targets.append(("ai_initiation_score", "qa", init_df))
+            else:
+                print("Skipping ai_initiation_score: not enough active-AI rows after filtering.")
         else:
             print("Skipping ai_initiation_score: not enough data.")
 
@@ -523,7 +697,7 @@ def run_lasso_text_analysis(
         print(f"\n{'='*60}")
         print(f"Fitting Lasso for target: {target_col}")
         print("="*60)
-        precomputed = _get_precomputed(corpus_key)
+        precomputed = None  # OOF path uses fold-local preprocessing; keep simple and robust.
 
         res = fit_lasso_ngram(
             corpus_df=corpus_map[corpus_key],
@@ -584,7 +758,8 @@ def run_lasso_text_analysis(
                 "target": tgt,
                 "n_docs": r["n_docs"],
                 "alpha": round(r["alpha"], 6),
-                "r2_train": round(r["r2"], 4),
+                "r2_train": round(r.get("r2_train", r["r2"]), 4),
+                "r2_oof": None if r.get("r2_oof") is None else round(r["r2_oof"], 4),
                 "kendall_tau": None if r["kendall_tau"] is None else round(r["kendall_tau"], 4),
                 "kendall_p": None if r["kendall_p"] is None else round(r["kendall_p"], 4),
                 "nonzero_features": len(r["coef_df"]),

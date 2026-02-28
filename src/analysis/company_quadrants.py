@@ -16,6 +16,35 @@ from scipy import stats
 from typing import Optional, Dict, Tuple
 import os
 
+try:
+    from src.utils.visual_style import (
+        SPOTIFY_COLORS,
+        apply_spotify_theme,
+        save_figure,
+        style_axes,
+        style_legend,
+    )
+except Exception:  # pragma: no cover
+    SPOTIFY_COLORS = {
+        "background": "#121212",
+        "fg": "#F5F5F5",
+        "muted": "#B3B3B3",
+        "accent": "#1DB954",
+        "negative": "#FF5A5F",
+        "grid": "#2A2A2A",
+        "blue": "#4EA1FF",
+        "warning": "#F4C542",
+    }
+    def apply_spotify_theme():
+        return None
+    def style_axes(ax, **kwargs):
+        return ax
+    def style_legend(ax):
+        return ax.get_legend()
+    def save_figure(fig, output_path: str, dpi: int = 150):
+        fig.savefig(output_path, dpi=dpi, bbox_inches='tight')
+        plt.close(fig)
+
 
 def classify_companies(
     doc_metrics_df: pd.DataFrame,
@@ -113,14 +142,16 @@ def plot_quadrant_scatter(
     """
     Create scatter plot with quadrant visualization.
     """
+    apply_spotify_theme()
     fig, ax = plt.subplots(figsize=(12, 10))
+    fig.patch.set_facecolor(SPOTIFY_COLORS.get("background", "#121212"))
     
     # Color by quadrant
     colors = {
-        'Aligned': 'green',
-        'Passive': 'blue',
-        'Self-Promoting': 'orange',
-        'Silent': 'gray'
+        'Aligned': SPOTIFY_COLORS.get("accent", "#1DB954"),
+        'Passive': SPOTIFY_COLORS.get("blue", "#4EA1FF"),
+        'Self-Promoting': SPOTIFY_COLORS.get("warning", "#F4C542"),
+        'Silent': SPOTIFY_COLORS.get("muted", "#B3B3B3"),
     }
     
     for quadrant, color in colors.items():
@@ -132,8 +163,8 @@ def plot_quadrant_scatter(
         )
     
     # Draw threshold lines
-    ax.axvline(x=speech_threshold, color='black', linestyle='--', alpha=0.5)
-    ax.axhline(y=qa_threshold, color='black', linestyle='--', alpha=0.5)
+    ax.axvline(x=speech_threshold, color=SPOTIFY_COLORS.get("grid", "#2A2A2A"), linestyle='--', alpha=0.9)
+    ax.axhline(y=qa_threshold, color=SPOTIFY_COLORS.get("grid", "#2A2A2A"), linestyle='--', alpha=0.9)
     
     # Labels for quadrants
     xlim = ax.get_xlim()
@@ -141,23 +172,23 @@ def plot_quadrant_scatter(
     
     offset = 0.02
     ax.text(xlim[1]-offset, ylim[1]-offset, 'Aligned\n(Genuine Focus)', 
-            ha='right', va='top', fontsize=10, color='green', weight='bold')
+            ha='right', va='top', fontsize=10, color=colors['Aligned'], weight='bold')
     ax.text(xlim[0]+offset, ylim[1]-offset, 'Passive\n(Responding)', 
-            ha='left', va='top', fontsize=10, color='blue', weight='bold')
+            ha='left', va='top', fontsize=10, color=colors['Passive'], weight='bold')
     ax.text(xlim[1]-offset, ylim[0]+offset, 'Self-Promoting\n(AI-Washing?)', 
-            ha='right', va='bottom', fontsize=10, color='orange', weight='bold')
+            ha='right', va='bottom', fontsize=10, color=colors['Self-Promoting'], weight='bold')
     ax.text(xlim[0]+offset, ylim[0]+offset, 'Silent\n(Disengaged)', 
-            ha='left', va='bottom', fontsize=10, color='gray', weight='bold')
+            ha='left', va='bottom', fontsize=10, color=colors['Silent'], weight='bold')
     
     ax.set_xlabel('Speech AI Intensity (Management Prepared Remarks)', fontsize=12)
     ax.set_ylabel('Q&A AI Intensity (Analyst Interaction)', fontsize=12)
     ax.set_title(title, fontsize=14)
     ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1))
-    ax.grid(True, alpha=0.3)
+    style_axes(ax, grid_axis="both", grid_alpha=0.08)
+    style_legend(ax)
     
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
-    plt.close()
+    fig.tight_layout()
+    save_figure(fig, output_path, dpi=180)
     print(f"Saved quadrant plot to {output_path}")
 
 
@@ -168,10 +199,17 @@ def plot_quadrant_distribution(
     """
     Create bar chart of quadrant distribution.
     """
+    apply_spotify_theme()
     fig, ax = plt.subplots(figsize=(10, 6))
+    fig.patch.set_facecolor(SPOTIFY_COLORS.get("background", "#121212"))
     
     counts = df['quadrant'].value_counts()
-    colors = ['green', 'blue', 'orange', 'gray']
+    colors = [
+        SPOTIFY_COLORS.get("accent", "#1DB954"),
+        SPOTIFY_COLORS.get("blue", "#4EA1FF"),
+        SPOTIFY_COLORS.get("warning", "#F4C542"),
+        SPOTIFY_COLORS.get("muted", "#B3B3B3"),
+    ]
     order = ['Aligned', 'Passive', 'Self-Promoting', 'Silent']
     
     counts = counts.reindex(order)
@@ -187,9 +225,9 @@ def plot_quadrant_distribution(
     ax.set_ylabel('Number of Companies', fontsize=12)
     ax.set_title('Distribution of Companies by AI Narrative Pattern', fontsize=14)
     
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
-    plt.close()
+    style_axes(ax, grid_axis="y", grid_alpha=0.10)
+    fig.tight_layout()
+    save_figure(fig, output_path, dpi=180)
     print(f"Saved distribution plot to {output_path}")
 
 

@@ -3,7 +3,7 @@
 from .regression import (
     prepare_regression_data,
     run_regression,
-    compute_kendall_tau,
+    compute_kendall_tau_oos as compute_kendall_tau,
     run_regression_analysis,
 )
 from .lasso_text_features import (

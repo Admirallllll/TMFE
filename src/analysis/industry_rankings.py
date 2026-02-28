@@ -9,9 +9,30 @@ from __future__ import annotations
 
 from typing import Optional, Tuple, List, Dict
 import os
+from pathlib import Path
 
 import pandas as pd
 import matplotlib.pyplot as plt
+
+try:
+    from src.utils.visual_style import (
+        SPOTIFY_COLORS,
+        apply_spotify_theme,
+        save_figure,
+        style_axes,
+        style_legend,
+    )
+except Exception:  # pragma: no cover
+    SPOTIFY_COLORS = {"background": "#121212", "fg": "#F5F5F5", "muted": "#B3B3B3", "grid": "#2A2A2A"}
+    def apply_spotify_theme():
+        return None
+    def style_axes(ax, **kwargs):
+        return ax
+    def style_legend(ax):
+        return ax.get_legend()
+    def save_figure(fig, output_path: str, dpi: int = 150):
+        fig.savefig(output_path, dpi=dpi, bbox_inches="tight")
+        plt.close(fig)
 
 
 # GICS Sector Code Mapping
@@ -61,7 +82,18 @@ def get_industry_mapping(final_dataset_path: str) -> pd.DataFrame:
     Returns:
         DataFrame with columns [ticker, gsector, sector], deduplicated by ticker
     """
-    df = pd.read_csv(final_dataset_path, usecols=["ticker", "gsector", "sector"])
+    path = Path(final_dataset_path)
+    required_cols = ["ticker", "gsector", "sector"]
+    suffix = path.suffix.lower()
+    if suffix == ".csv":
+        df = pd.read_csv(path, usecols=required_cols)
+    elif suffix in {".parquet", ".pq"}:
+        df = pd.read_parquet(path, columns=required_cols)
+    else:
+        raise ValueError(
+            f"Unsupported dataset format for industry mapping: {path.suffix or '[no extension]'}. "
+            "Expected .csv or .parquet"
+        )
 
     # Deduplicate by ticker (take first occurrence)
     mapping = df.drop_duplicates(subset=["ticker"], keep="first").reset_index(drop=True)
@@ -180,7 +212,9 @@ def plot_industry_ai_trends(
         output_path: Path to save the figure
         title: Plot title
     """
+    apply_spotify_theme()
     fig, ax = plt.subplots(figsize=(14, 8))
+    fig.patch.set_facecolor(SPOTIFY_COLORS.get("background", "#121212"))
 
     # Get unique sectors and create color mapping
     sectors = industry_year_df["sector"].unique()
@@ -212,11 +246,11 @@ def plot_industry_ai_trends(
     # Legend outside plot
     ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left", fontsize=10)
 
-    ax.grid(True, alpha=0.3)
+    style_axes(ax, grid_axis="y", grid_alpha=0.08)
+    style_legend(ax)
 
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=150, bbox_inches="tight")
-    plt.close()
+    fig.tight_layout()
+    save_figure(fig, output_path, dpi=180)
     print(f"Saved industry AI trends plot to {output_path}")
 
 

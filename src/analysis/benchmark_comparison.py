@@ -24,6 +24,30 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.feature_extraction.text import TfidfVectorizer
 
+try:
+    from src.utils.visual_style import (
+        SPOTIFY_COLORS,
+        apply_spotify_theme,
+        save_figure,
+        style_axes,
+    )
+except Exception:  # pragma: no cover
+    SPOTIFY_COLORS = {
+        "background": "#121212",
+        "accent": "#1DB954",
+        "fg": "#F5F5F5",
+        "muted": "#B3B3B3",
+        "blue": "#4EA1FF",
+        "negative": "#FF5A5F",
+    }
+    def apply_spotify_theme():
+        return None
+    def style_axes(ax, **kwargs):
+        return ax
+    def save_figure(fig, output_path: str, dpi: int = 180):
+        fig.savefig(output_path, dpi=dpi, bbox_inches="tight")
+        plt.close(fig)
+
 
 DEFAULT_METADATA_FEATURES = [
     "log_mktcap",
@@ -225,6 +249,7 @@ def evaluate_benchmark_models(
     metadata_features: Optional[Sequence[str]] = None,
     include_metadata_elasticnet: bool = True,
     text_model_mode: str = "raw",
+    filter_non_ai_initiation: bool = True,
     verbose: bool = False,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
@@ -242,6 +267,16 @@ def evaluate_benchmark_models(
 
     base = regression_df.copy()
     base = base[base[target_col].notna()].copy()
+    if (
+        filter_non_ai_initiation
+        and target_col == "ai_initiation_score"
+        and "total_ai_exchanges" in base.columns
+    ):
+        before = len(base)
+        base = base[base["total_ai_exchanges"].fillna(0) > 0].copy()
+        removed = before - len(base)
+        if verbose or removed > 0:
+            print(f"[Benchmark] Filtered no-AI initiation rows: removed {removed}, remaining {len(base)}")
     if text_model_mode == "raw":
         text_df = _aggregate_doc_text(sentences_df, section=text_section) if sentences_df is not None else pd.DataFrame(columns=["doc_id", "doc_text"])
         base = base.merge(text_df, on="doc_id", how="left")
@@ -304,8 +339,9 @@ def evaluate_benchmark_models(
         try:
             if verbose:
                 print(f"  - fitting Text Lasso ({text_model_mode})")
+            text_model_label = "Text TF-IDF Lasso" if text_model_mode == "raw" else "Text-Ratio Lasso"
             if text_model_mode == "raw":
-                model_preds["Text Lasso"] = _predict_text_lasso(
+                model_preds[text_model_label] = _predict_text_lasso(
                     train_text=train_df["doc_text"],
                     y_train=y_train,
                     test_text=test_df["doc_text"],
@@ -313,14 +349,14 @@ def evaluate_benchmark_models(
                     random_state=random_state,
                 )
             else:
-                model_preds["Text Lasso"] = _predict_text_ratio_lasso(
+                model_preds[text_model_label] = _predict_text_ratio_lasso(
                     train_df=train_df,
                     y_train=y_train,
                     test_df=test_df,
                     text_ratio_features=DEFAULT_TEXT_RATIO_FEATURES,
                 )
         except Exception:
-            model_preds["Text Lasso"] = np.full(len(test_df), float(np.mean(y_train)))
+            model_preds[text_model_label] = np.full(len(test_df), float(np.mean(y_train)))
 
         for model_name, y_pred in model_preds.items():
             y_pred = np.asarray(y_pred, dtype=float)
@@ -356,7 +392,7 @@ def evaluate_benchmark_models(
             },
             Folds=("Fold", "count"),
         )
-        .sort_values(["MAE_mean", "Kendall Tau_mean"], ascending=[True, False])
+        .sort_values(["Kendall Tau_mean", "MAE_mean"], ascending=[False, True])
         .reset_index(drop=True)
     )
     for col in ["MAE_std", "RMSE_std", "Kendall Tau_std"]:
@@ -366,19 +402,21 @@ def evaluate_benchmark_models(
 
 
 def _plot_benchmark_comparison(summary_df: pd.DataFrame, output_png: str) -> None:
+    apply_spotify_theme()
     plot_df = summary_df.copy()
     if len(plot_df) == 0:
         return
 
-    # Preserve row order (best MAE first).
+    # Preserve summary order (ranked by Kendall Tau).
     y_pos = np.arange(len(plot_df))
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    fig.patch.set_facecolor(SPOTIFY_COLORS.get("background", "#121212"))
 
     axes[0].barh(
         y_pos,
         plot_df["MAE_mean"].values,
         xerr=plot_df["MAE_std"].values,
-        color="#4C78A8",
+        color=SPOTIFY_COLORS.get("blue", "#4EA1FF"),
         alpha=0.9,
     )
     axes[0].set_yticks(y_pos)
@@ -386,13 +424,13 @@ def _plot_benchmark_comparison(summary_df: pd.DataFrame, output_png: str) -> Non
     axes[0].invert_yaxis()
     axes[0].set_title("MAE (lower is better)")
     axes[0].set_xlabel("MAE")
-    axes[0].grid(axis="x", alpha=0.2)
+    style_axes(axes[0], grid_axis="x", grid_alpha=0.12)
 
     axes[1].barh(
         y_pos,
         plot_df["Kendall Tau_mean"].values,
         xerr=plot_df["Kendall Tau_std"].values,
-        color="#F58518",
+        color=SPOTIFY_COLORS.get("accent", "#1DB954"),
         alpha=0.9,
     )
     axes[1].set_yticks(y_pos)
@@ -400,12 +438,11 @@ def _plot_benchmark_comparison(summary_df: pd.DataFrame, output_png: str) -> Non
     axes[1].invert_yaxis()
     axes[1].set_title("Kendall's Tau (higher is better)")
     axes[1].set_xlabel("Kendall Tau")
-    axes[1].grid(axis="x", alpha=0.2)
+    style_axes(axes[1], grid_axis="x", grid_alpha=0.12)
 
-    fig.suptitle("Benchmark Comparison: Predicting ai_initiation_score", fontsize=13)
+    fig.suptitle("Benchmark Comparison (ranked by Kendall's Tau): ai_initiation_score", fontsize=13)
     fig.tight_layout()
-    fig.savefig(output_png, dpi=180, bbox_inches="tight")
-    plt.close(fig)
+    save_figure(fig, output_png, dpi=180)
 
 
 def write_benchmark_outputs(
@@ -438,6 +475,7 @@ def run_benchmark_comparison(
     text_max_features: int = 3000,
     include_metadata_elasticnet: bool = True,
     text_model_mode: str = "ratios",
+    filter_non_ai_initiation: bool = True,
     verbose: bool = True,
 ) -> Dict[str, str]:
     reg_df = pd.read_parquet(regression_dataset_path)
@@ -453,6 +491,7 @@ def run_benchmark_comparison(
         text_max_features=text_max_features,
         include_metadata_elasticnet=include_metadata_elasticnet,
         text_model_mode=text_model_mode,
+        filter_non_ai_initiation=filter_non_ai_initiation,
         verbose=verbose,
     )
     paths = write_benchmark_outputs(folds_df, summary_df, output_dir=output_dir)
@@ -472,6 +511,7 @@ def main() -> None:
     parser.add_argument("--text-max-features", type=int, default=3000)
     parser.add_argument("--no-metadata-elasticnet", action="store_true")
     parser.add_argument("--text-model", default="ratios", choices=["ratios", "raw"])
+    parser.add_argument("--no-filter-non-ai-initiation", action="store_true")
     args = parser.parse_args()
 
     section = None if args.text_section == "all" else args.text_section
@@ -487,6 +527,7 @@ def main() -> None:
         text_max_features=args.text_max_features,
         include_metadata_elasticnet=not args.no_metadata_elasticnet,
         text_model_mode=args.text_model,
+        filter_non_ai_initiation=not args.no_filter_non_ai_initiation,
     )
     print("Saved benchmark outputs:")
     for k, v in paths.items():

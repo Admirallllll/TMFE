@@ -2,185 +2,329 @@
 Regression Analysis Module
 
 Cross-sectional regression analysis:
-- DV: AI Initiation Score (management proactiveness)
-- IVs: R&D Intensity, Lagged Returns, Beat/Miss Earnings, Market Cap, Industry,
-       Analyst-Initiated Ratio, Management-Pivot Ratio
+- DVs: AI Initiation Score (management proactiveness), Overall AI keyword ratio
+- IVs: Financial and metadata features (no target-component leakage)
 
 Evaluation:
-- R² (in-sample)
-- Kendall's Tau (rank correlation of predictions vs actuals) — professor's preferred metric
+- R² (in-sample, descriptive fit only)
+- Kendall's Tau (out-of-sample fold-based rank correlation) — professor's preferred metric
 """
 
-import pandas as pd
-import numpy as np
-import statsmodels.api as sm
-from statsmodels.iolib.summary2 import summary_col
-from scipy.stats import kendalltau
-from typing import Optional, Dict, List, Tuple
-import matplotlib.pyplot as plt
-import seaborn as sns
+from __future__ import annotations
+
 import os
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import seaborn as sns
+import statsmodels.api as sm
+from scipy.stats import kendalltau
+from sklearn.model_selection import GroupKFold, KFold
+from statsmodels.iolib.summary2 import summary_col
+
+try:
+    from src.utils.visual_style import (
+        SPOTIFY_COLORS,
+        apply_spotify_theme,
+        save_figure,
+        style_axes,
+    )
+except Exception:  # pragma: no cover - visual fallback if utility unavailable
+    SPOTIFY_COLORS = {
+        "accent": "#1DB954",
+        "fg": "#F5F5F5",
+        "muted": "#B3B3B3",
+        "negative": "#FF5A5F",
+        "grid": "#2A2A2A",
+        "background": "#121212",
+    }
+
+    def apply_spotify_theme() -> None:
+        return None
+
+    def style_axes(ax, **kwargs):
+        return ax
+
+    def save_figure(fig, output_path: str, **kwargs):
+        fig.savefig(output_path, dpi=kwargs.get("dpi", 150), bbox_inches="tight")
+        plt.close(fig)
 
 
 def prepare_regression_data(
     initiation_scores_path: str,
     doc_metrics_path: str,
-    wrds_data_path: str
+    wrds_data_path: str,
 ) -> pd.DataFrame:
     """
     Prepare data for regression analysis by merging metrics with financial data.
-    
-    Args:
-        initiation_scores_path: Path to initiation scores
-        doc_metrics_path: Path to document metrics
-        wrds_data_path: Path to WRDS metadata
-        
-    Returns:
-        Merged DataFrame ready for regression
     """
     print("Loading data...")
 
-    # Load data
     initiation = pd.read_parquet(initiation_scores_path)
     doc_metrics = pd.read_parquet(doc_metrics_path)
     wrds = pd.read_csv(wrds_data_path, low_memory=False)
 
-    # Handle empty initiation scores DataFrame
-    if len(initiation) == 0 or 'doc_id' not in initiation.columns:
+    if len(initiation) == 0 or "doc_id" not in initiation.columns:
         print("Warning: No initiation scores available. Using doc_metrics only.")
-        initiation = doc_metrics[['doc_id']].copy()
-        initiation['ai_initiation_score'] = 0.5  # Neutral default
-        initiation['total_ai_exchanges'] = 0
-        initiation['analyst_initiated_ratio'] = 0.0
-        initiation['management_pivot_ratio'] = 0.0
+        initiation = doc_metrics[["doc_id"]].copy()
+        initiation["ai_initiation_score"] = 0.5
+        initiation["total_ai_exchanges"] = 0
+        initiation["analyst_initiated_ratio"] = 0.0
+        initiation["management_pivot_ratio"] = 0.0
 
-    # Parse doc_id into ticker, year, quarter
-    def parse_doc_id(doc_id):
-        parts = str(doc_id).rsplit('_', 1)
+    def parse_doc_id(doc_id: str) -> Tuple[Optional[str], Optional[int], Optional[int]]:
+        parts = str(doc_id).rsplit("_", 1)
         if len(parts) == 2:
             ticker = parts[0]
             yq = parts[1]
-            if 'Q' in yq:
-                year = int(yq.split('Q')[0])
-                quarter = int(yq.split('Q')[1])
+            if "Q" in yq:
+                year = int(yq.split("Q")[0])
+                quarter = int(yq.split("Q")[1])
                 return ticker, year, quarter
         return None, None, None
-    
-    # Add parsed columns
-    initiation['_parsed'] = initiation['doc_id'].apply(parse_doc_id)
-    initiation['ticker'] = [p[0] for p in initiation['_parsed']]
-    initiation['year'] = [p[1] for p in initiation['_parsed']]
-    initiation['quarter'] = [p[2] for p in initiation['_parsed']]
-    initiation = initiation.drop('_parsed', axis=1)
-    
-    # Same for doc_metrics
-    doc_metrics['_parsed'] = doc_metrics['doc_id'].apply(parse_doc_id)
-    doc_metrics['ticker'] = [p[0] for p in doc_metrics['_parsed']]
-    doc_metrics['year'] = [p[1] for p in doc_metrics['_parsed']]
-    doc_metrics['quarter'] = [p[2] for p in doc_metrics['_parsed']]
-    doc_metrics = doc_metrics.drop('_parsed', axis=1)
-    
-    # Merge initiation and doc_metrics
-    # Include initiation sub-columns that carry linguistic/sociolinguistic signal
-    # Preserve parsed merge keys for the downstream WRDS merge.
-    init_cols = ['doc_id', 'ticker', 'year', 'quarter']
-    for col in ['ai_initiation_score', 'total_ai_exchanges', 'analyst_initiated_ratio',
-                'management_pivot_ratio', 'analyst_only_count', 'analyst_initiated_count',
-                'management_pivot_count']:
+
+    initiation["_parsed"] = initiation["doc_id"].apply(parse_doc_id)
+    initiation["ticker"] = [p[0] for p in initiation["_parsed"]]
+    initiation["year"] = [p[1] for p in initiation["_parsed"]]
+    initiation["quarter"] = [p[2] for p in initiation["_parsed"]]
+    initiation = initiation.drop("_parsed", axis=1)
+
+    doc_metrics["_parsed"] = doc_metrics["doc_id"].apply(parse_doc_id)
+    doc_metrics["ticker"] = [p[0] for p in doc_metrics["_parsed"]]
+    doc_metrics["year"] = [p[1] for p in doc_metrics["_parsed"]]
+    doc_metrics["quarter"] = [p[2] for p in doc_metrics["_parsed"]]
+    doc_metrics = doc_metrics.drop("_parsed", axis=1)
+
+    init_cols = ["doc_id", "ticker", "year", "quarter"]
+    for col in [
+        "ai_initiation_score",
+        "total_ai_exchanges",
+        "analyst_initiated_ratio",
+        "management_pivot_ratio",
+        "analyst_only_count",
+        "analyst_initiated_count",
+        "management_pivot_count",
+    ]:
         if col in initiation.columns:
             init_cols.append(col)
     merged = pd.merge(
         initiation[init_cols],
-        doc_metrics[['doc_id', 'speech_kw_ai_ratio', 'qa_kw_ai_ratio', 'overall_kw_ai_ratio']],
-        on='doc_id',
-        how='left'
+        doc_metrics[["doc_id", "speech_kw_ai_ratio", "qa_kw_ai_ratio", "overall_kw_ai_ratio"]],
+        on="doc_id",
+        how="left",
     )
-    
-    # Prepare WRDS data (need to match on ticker + quarter)
-    wrds = wrds.rename(columns={'tic': 'ticker'})
-    if 'datadate' in wrds.columns:
-        wrds['datadate'] = pd.to_datetime(wrds['datadate'], errors='coerce')
-    
-    # Parse WRDS quarter
-    if 'datacqtr' in wrds.columns:
-        wrds['wrds_year'] = wrds['datacqtr'].str[:4].astype(int)
-        wrds['wrds_quarter'] = wrds['datacqtr'].str[-1].astype(int)
-    
-    # Create financial metrics
-    # R&D Intensity = R&D / Market Value
-    wrds['rd_intensity'] = wrds['xrdq'] / wrds['mkvaltq']
-    wrds['rd_intensity'] = wrds['rd_intensity'].replace([np.inf, -np.inf], np.nan)
-    
-    # Log Market Cap
-    wrds['log_mktcap'] = np.log(wrds['mkvaltq'].replace(0, np.nan))
-    
-    # Stock Return (simplistic: price change, would need lag data for proper calc)
-    # For now, just use price as proxy
-    wrds['stock_price'] = wrds['prccq']
-    
-    # EPS Beat/Miss (simplified: positive EPS = beat)
-    wrds['eps_positive'] = (wrds['epspxq'] > 0).astype(int)
-    
-    # Industry dummies (using GICS sector)
-    if 'gsector' in wrds.columns:
-        wrds['sector'] = wrds['gsector'].astype(str)
-    
-    # Select WRDS columns for merge
-    wrds_cols = ['ticker', 'wrds_year', 'wrds_quarter',
-                 'rd_intensity', 'log_mktcap', 'stock_price', 
-                 'eps_positive', 'sector', 'mkvaltq', 'xrdq', 'epspxq']
-    wrds_subset = wrds[wrds_cols + (['datadate'] if 'datadate' in wrds.columns else [])].copy()
-    # Ensure one row per (ticker, year, quarter) to avoid duplicate-merge explosions
-    if 'datadate' in wrds_subset.columns:
-        wrds_subset = wrds_subset.sort_values(['datadate'])
-        wrds_subset = wrds_subset.drop_duplicates(subset=['ticker', 'wrds_year', 'wrds_quarter'], keep='last')
-        wrds_subset = wrds_subset.drop(columns=['datadate'])
+
+    wrds = wrds.rename(columns={"tic": "ticker"})
+    if "datadate" in wrds.columns:
+        wrds["datadate"] = pd.to_datetime(wrds["datadate"], errors="coerce")
+
+    if "datacqtr" in wrds.columns:
+        wrds["wrds_year"] = wrds["datacqtr"].astype(str).str[:4].astype(int)
+        wrds["wrds_quarter"] = wrds["datacqtr"].astype(str).str[-1].astype(int)
+
+    wrds["rd_intensity"] = wrds["xrdq"] / wrds["mkvaltq"]
+    wrds["rd_intensity"] = wrds["rd_intensity"].replace([np.inf, -np.inf], np.nan)
+    wrds["log_mktcap"] = np.log(wrds["mkvaltq"].replace(0, np.nan))
+    wrds["stock_price"] = wrds["prccq"]
+    wrds["eps_positive"] = (wrds["epspxq"] > 0).astype(int)
+    if "gsector" in wrds.columns:
+        wrds["sector"] = wrds["gsector"].astype(str)
+
+    wrds_cols = [
+        "ticker",
+        "wrds_year",
+        "wrds_quarter",
+        "rd_intensity",
+        "log_mktcap",
+        "stock_price",
+        "eps_positive",
+        "sector",
+        "mkvaltq",
+        "xrdq",
+        "epspxq",
+    ]
+    wrds_subset = wrds[wrds_cols + (["datadate"] if "datadate" in wrds.columns else [])].copy()
+    if "datadate" in wrds_subset.columns:
+        wrds_subset = (
+            wrds_subset.sort_values(["datadate"])
+            .drop_duplicates(subset=["ticker", "wrds_year", "wrds_quarter"], keep="last")
+            .drop(columns=["datadate"])
+        )
     else:
-        wrds_subset = wrds_subset.drop_duplicates(subset=['ticker', 'wrds_year', 'wrds_quarter'], keep='last')
-    
-    # Merge with main data
+        wrds_subset = wrds_subset.drop_duplicates(
+            subset=["ticker", "wrds_year", "wrds_quarter"], keep="last"
+        )
+
     final = pd.merge(
         merged,
         wrds_subset,
-        left_on=['ticker', 'year', 'quarter'],
-        right_on=['ticker', 'wrds_year', 'wrds_quarter'],
-        how='left'
+        left_on=["ticker", "year", "quarter"],
+        right_on=["ticker", "wrds_year", "wrds_quarter"],
+        how="left",
     )
-    
+
     print(f"Final regression dataset: {len(final)} observations")
     print(f"Missing rd_intensity: {final['rd_intensity'].isna().sum()}")
     print(f"Missing log_mktcap: {final['log_mktcap'].isna().sum()}")
-    
+
     return final
 
 
-def compute_kendall_tau(
-    results: sm.regression.linear_model.RegressionResultsWrapper,
+def _prepare_model_frame(
     df: pd.DataFrame,
     dv: str,
-    ivs: List[str],
-) -> Tuple[float, float]:
-    """
-    Compute Kendall's Tau rank correlation between fitted values and actuals.
+    ivs: Sequence[str],
+    filter_non_ai_initiation: bool = True,
+) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """Build a model-ready frame and a transparent attrition summary."""
+    work = df.copy()
+    total_rows = int(len(work))
+    attrition: Dict[str, Any] = {
+        "target": dv,
+        "ivs": list(ivs),
+        "rows_total": total_rows,
+        "rows_removed_no_ai_filter": 0,
+        "rows_after_no_ai_filter": total_rows,
+        "rows_missing_dv": 0,
+        "rows_final": 0,
+        "missing_by_column": {},
+    }
 
-    This is the professor's preferred evaluation metric for economic models,
-    since ranking consistency matters more than point-accuracy in finance.
+    if filter_non_ai_initiation and dv == "ai_initiation_score" and "total_ai_exchanges" in work.columns:
+        mask = work["total_ai_exchanges"].fillna(0) > 0
+        attrition["rows_removed_no_ai_filter"] = int((~mask).sum())
+        work = work.loc[mask].copy()
+        attrition["rows_after_no_ai_filter"] = int(len(work))
 
-    Args:
-        results: Fitted statsmodels OLS results.
-        df:      DataFrame used in regression.
-        dv:      Dependent variable column name.
-        ivs:     Independent variable column names.
+    if dv in work.columns:
+        attrition["rows_missing_dv"] = int(work[dv].isna().sum())
 
-    Returns:
-        Tuple of (tau, p_value).
-    """
-    cols = [dv] + ivs
-    reg_df = df[cols].dropna()
-    y_true = reg_df[dv].values
-    y_pred = results.fittedvalues.values
-    tau, p_val = kendalltau(y_true, y_pred)
-    return tau, p_val
+    needed_cols = [dv] + list(ivs)
+    for col in needed_cols:
+        attrition["missing_by_column"][col] = int(work[col].isna().sum()) if col in work.columns else int(len(work))
+
+    reg_df = work.dropna(subset=needed_cols).copy()
+    attrition["rows_final"] = int(len(reg_df))
+    return reg_df, attrition
+
+
+def _print_attrition(label: str, attrition: Dict[str, Any]) -> None:
+    print(f"  [{label}] Sample attrition for target={attrition['target']}")
+    print(f"    total rows: {attrition['rows_total']}")
+    print(f"    removed no-AI initiation rows: {attrition['rows_removed_no_ai_filter']}")
+    print(f"    rows after no-AI filter: {attrition['rows_after_no_ai_filter']}")
+    print(f"    missing DV rows: {attrition['rows_missing_dv']}")
+    for col, miss in attrition.get("missing_by_column", {}).items():
+        print(f"    missing {col}: {miss}")
+    print(f"    final regression sample: {attrition['rows_final']}")
+
+
+def _iter_oos_splits(
+    reg_df: pd.DataFrame,
+    group_col: Optional[str] = "ticker",
+    n_splits: int = 5,
+    random_state: int = 42,
+) -> Tuple[List[Tuple[np.ndarray, np.ndarray]], str]:
+    n_splits = max(2, int(n_splits))
+    if len(reg_df) < n_splits:
+        n_splits = max(2, len(reg_df))
+
+    if group_col and group_col in reg_df.columns:
+        groups = reg_df[group_col].fillna("__MISSING_GROUP__").astype(str)
+        n_groups = groups.nunique()
+        if n_groups >= n_splits and n_splits >= 2:
+            splitter = GroupKFold(n_splits=n_splits)
+            return list(splitter.split(reg_df, groups=groups)), f"GroupKFold({group_col})"
+        print(
+            f"  [OOS] Falling back to KFold: insufficient groups for {group_col} "
+            f"(groups={n_groups}, n_splits={n_splits})"
+        )
+
+    splitter = KFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+    return list(splitter.split(reg_df)), "KFold"
+
+
+def _fit_statsmodels_ols(
+    train_df: pd.DataFrame,
+    dv: str,
+    ivs: Sequence[str],
+    add_constant: bool = True,
+    robust: bool = True,
+) -> sm.regression.linear_model.RegressionResultsWrapper:
+    y_train = train_df[dv]
+    X_train = train_df[list(ivs)]
+    if add_constant:
+        X_train = sm.add_constant(X_train, has_constant="add")
+    model = sm.OLS(y_train, X_train)
+    return model.fit(cov_type="HC1") if robust else model.fit()
+
+
+def compute_kendall_tau_oos(
+    df: pd.DataFrame,
+    dv: str,
+    ivs: Sequence[str],
+    add_constant: bool = True,
+    robust: bool = True,
+    group_col: Optional[str] = "ticker",
+    n_splits: int = 5,
+    random_state: int = 42,
+) -> Dict[str, Any]:
+    """Compute OOS Kendall's tau using fold-based held-out predictions."""
+    reg_df = df.dropna(subset=[dv] + list(ivs)).copy()
+    if len(reg_df) < 3:
+        return {
+            "kendall_tau": np.nan,
+            "kendall_p": np.nan,
+            "n_obs": int(len(reg_df)),
+            "split_method": "insufficient-data",
+            "oof_predictions": np.array([], dtype=float),
+        }
+
+    effective_splits = min(max(2, n_splits), len(reg_df))
+    splits, split_method = _iter_oos_splits(
+        reg_df, group_col=group_col, n_splits=effective_splits, random_state=random_state
+    )
+
+    y_true = reg_df[dv].to_numpy(dtype=float)
+    y_oof = np.full(len(reg_df), np.nan, dtype=float)
+
+    for train_idx, test_idx in splits:
+        train_df = reg_df.iloc[train_idx]
+        test_df = reg_df.iloc[test_idx]
+        if len(train_df) < max(3, len(ivs) + 1):
+            y_oof[test_idx] = float(train_df[dv].mean()) if len(train_df) else float(np.nanmean(y_true))
+            continue
+
+        try:
+            fitted = _fit_statsmodels_ols(train_df, dv=dv, ivs=ivs, add_constant=add_constant, robust=robust)
+            X_test = test_df[list(ivs)]
+            if add_constant:
+                X_test = sm.add_constant(X_test, has_constant="add")
+                X_test = X_test.reindex(columns=fitted.model.exog_names, fill_value=0.0)
+                if "const" in X_test.columns:
+                    X_test["const"] = 1.0
+            preds = np.asarray(fitted.predict(X_test), dtype=float)
+        except Exception:
+            preds = np.full(len(test_df), float(train_df[dv].mean()), dtype=float)
+
+        y_oof[test_idx] = preds
+
+    valid = ~np.isnan(y_oof)
+    if valid.sum() < 2:
+        tau = np.nan
+        p_val = np.nan
+    else:
+        tau, p_val = kendalltau(y_true[valid], y_oof[valid])
+
+    return {
+        "kendall_tau": float(tau) if tau is not None and not np.isnan(tau) else np.nan,
+        "kendall_p": float(p_val) if p_val is not None and not np.isnan(p_val) else np.nan,
+        "n_obs": int(valid.sum()),
+        "split_method": split_method,
+        "oof_predictions": y_oof,
+    }
 
 
 def run_regression(
@@ -188,214 +332,188 @@ def run_regression(
     dv: str,
     ivs: List[str],
     add_constant: bool = True,
-    robust: bool = True
+    robust: bool = True,
 ) -> sm.regression.linear_model.RegressionResultsWrapper:
-    """
-    Run OLS regression.
-    
-    Args:
-        df: DataFrame with variables
-        dv: Dependent variable column name
-        ivs: List of independent variable column names
-        add_constant: Whether to add intercept
-        robust: Whether to use robust standard errors
-        
-    Returns:
-        statsmodels regression results
-    """
-    # Drop missing values
-    cols = [dv] + ivs
-    reg_df = df[cols].dropna()
-    
+    """Run OLS regression on an already-filtered model frame."""
+    reg_df = df[[dv] + ivs].dropna()
     print(f"Regression sample size: {len(reg_df)}")
-    
-    y = reg_df[dv]
-    X = reg_df[ivs]
-    
-    if add_constant:
-        X = sm.add_constant(X)
-    
-    model = sm.OLS(y, X)
-    
-    if robust:
-        results = model.fit(cov_type='HC1')  # Heteroskedasticity-robust
-    else:
-        results = model.fit()
-    
-    return results
+    return _fit_statsmodels_ols(reg_df, dv=dv, ivs=ivs, add_constant=add_constant, robust=robust)
 
 
 def run_regression_analysis(
     initiation_scores_path: str,
     doc_metrics_path: str,
     wrds_data_path: str,
-    output_dir: str = "outputs/figures"
-) -> Dict:
-    """
-    Full regression analysis pipeline.
-    
-    Args:
-        initiation_scores_path: Path to initiation scores
-        doc_metrics_path: Path to document metrics
-        wrds_data_path: Path to WRDS data
-        output_dir: Output directory
-        
-    Returns:
-        Dictionary with regression results
-    """
+    output_dir: str = "outputs/figures",
+    oos_group_col: Optional[str] = "ticker",
+    oos_cv_folds: int = 5,
+    filter_non_ai_initiation: bool = True,
+    random_state: int = 42,
+) -> Dict[str, Any]:
+    """Full regression analysis pipeline with OOS Kendall Tau and attrition logging."""
     os.makedirs(output_dir, exist_ok=True)
-    
-    # Prepare data
-    reg_df = prepare_regression_data(
-        initiation_scores_path,
-        doc_metrics_path,
-        wrds_data_path
-    )
-    
-    # Save regression dataset
-    reg_df.to_parquet(f"{output_dir}/../features/regression_dataset.parquet", index=False)
-    
-    results = {}
-    ivs_base = ['log_mktcap', 'rd_intensity']
-    ivs_fin  = ['log_mktcap', 'rd_intensity', 'eps_positive']
+    apply_spotify_theme()
 
-    # Build list of available initiation sub-features to use as IVs
-    initiation_ivs = [iv for iv in ['analyst_initiated_ratio', 'management_pivot_ratio']
-                      if iv in reg_df.columns]
+    reg_df = prepare_regression_data(initiation_scores_path, doc_metrics_path, wrds_data_path)
+    features_out_dir = os.path.normpath(os.path.join(output_dir, "..", "features"))
+    os.makedirs(features_out_dir, exist_ok=True)
+    reg_df.to_parquet(os.path.join(features_out_dir, "regression_dataset.parquet"), index=False)
 
-    def _print_tau(model, dv, ivs, label):
-        """Compute and print Kendall Tau for a fitted model."""
-        try:
-            tau, p_val = compute_kendall_tau(model, reg_df, dv, ivs)
-            print(f"  [{label}] Kendall's Tau = {tau:.4f}  (p = {p_val:.4f})")
-            return tau, p_val
-        except Exception as e:
-            print(f"  [Warning] Could not compute Kendall Tau: {e}")
-            return None, None
+    results: Dict[str, Any] = {}
+    ivs_base = ["log_mktcap", "rd_intensity"]
+    ivs_fin = ["log_mktcap", "rd_intensity", "eps_positive"]
 
-    # ------------------------------------------------------------------
-    # Model 1: Basic — AI Initiation Score ~ Size + R&D
-    # ------------------------------------------------------------------
-    print("\n" + "="*60)
-    print("Model 1: AI Initiation Score ~ Size + R&D Intensity")
-    print("="*60)
-    model1 = run_regression(reg_df, dv='ai_initiation_score', ivs=ivs_base)
-    print(model1.summary())
-    _print_tau(model1, 'ai_initiation_score', ivs_base, 'Model 1')
-    results['model1'] = model1
+    attrition_records: List[Dict[str, Any]] = []
+    oos_metrics: Dict[str, Dict[str, Any]] = {}
 
-    # ------------------------------------------------------------------
-    # Model 2: Add EPS Beat/Miss
-    # ------------------------------------------------------------------
-    print("\n" + "="*60)
-    print("Model 2: Add EPS (Beat/Miss)")
-    print("="*60)
-    model2 = run_regression(reg_df, dv='ai_initiation_score', ivs=ivs_fin)
-    print(model2.summary())
-    _print_tau(model2, 'ai_initiation_score', ivs_fin, 'Model 2')
-    results['model2'] = model2
+    def _run_model(label: str, result_key: str, dv: str, ivs: List[str]) -> None:
+        print("\n" + "=" * 60)
+        print(f"{label}: {dv} ~ {', '.join(ivs)}")
+        print("=" * 60)
 
-    # ------------------------------------------------------------------
-    # Model 3: Overall AI Ratio as DV
-    # ------------------------------------------------------------------
-    print("\n" + "="*60)
-    print("Model 3: Overall AI Ratio (KW) ~ Financial Metrics")
-    print("="*60)
-    model3 = run_regression(reg_df, dv='overall_kw_ai_ratio', ivs=ivs_fin)
-    print(model3.summary())
-    _print_tau(model3, 'overall_kw_ai_ratio', ivs_fin, 'Model 3')
-    results['model3'] = model3
+        model_df, attrition = _prepare_model_frame(
+            reg_df,
+            dv=dv,
+            ivs=ivs,
+            filter_non_ai_initiation=filter_non_ai_initiation,
+        )
+        attrition_row = {
+            "model_label": label,
+            "target": dv,
+            "ivs": "|".join(ivs),
+            "rows_total": attrition["rows_total"],
+            "rows_removed_no_ai_filter": attrition["rows_removed_no_ai_filter"],
+            "rows_after_no_ai_filter": attrition["rows_after_no_ai_filter"],
+            "rows_missing_dv": attrition["rows_missing_dv"],
+            "rows_final": attrition["rows_final"],
+        }
+        for miss_col, miss_val in attrition.get("missing_by_column", {}).items():
+            attrition_row[f"missing_{miss_col}"] = miss_val
+        attrition_records.append(attrition_row)
+        _print_attrition(label, attrition)
 
-    # ------------------------------------------------------------------
-    # Model 4: Add Initiation Sub-features (sociolinguistic features)
-    # These capture: who drives AI talk — analyst pressure vs management proactiveness
-    # ------------------------------------------------------------------
-    if initiation_ivs:
-        ivs_init = ivs_fin + initiation_ivs
-        print("\n" + "="*60)
-        print(f"Model 4: AI Initiation Score ~ Financial + Initiation Features")
-        print(f"  Initiation IVs: {initiation_ivs}")
-        print("="*60)
-        model4 = run_regression(reg_df, dv='ai_initiation_score', ivs=ivs_init)
-        print(model4.summary())
-        _print_tau(model4, 'ai_initiation_score', ivs_init, 'Model 4')
-        results['model4'] = model4
-    else:
-        print("\n[Skipping Model 4: initiation sub-features not available in dataset]")
+        if len(model_df) < max(10, len(ivs) + 2):
+            print(f"  [Skipping {label}] insufficient rows after filtering/dropna: {len(model_df)}")
+            return
 
-    # ------------------------------------------------------------------
-    # Summary table
-    # ------------------------------------------------------------------
-    model_list   = [results[k] for k in ['model1', 'model2', 'model3'] if k in results]
-    model_labels = ['AI Init (1)', 'AI Init (2)', 'AI Ratio (3)']
-    if 'model4' in results:
-        model_list.append(results['model4'])
-        model_labels.append('AI Init+Initiation (4)')
+        model = run_regression(model_df, dv=dv, ivs=ivs)
+        print(model.summary())
+        results[result_key] = model
 
-    summary = summary_col(
-        model_list,
-        stars=True,
-        float_format='%0.4f',
-        model_names=model_labels
-    )
-    with open(f"{output_dir}/regression_summary.txt", 'w') as f:
-        f.write(str(summary))
-    print(f"\nSaved regression summary → {output_dir}/regression_summary.txt")
+        oos = compute_kendall_tau_oos(
+            model_df,
+            dv=dv,
+            ivs=ivs,
+            group_col=oos_group_col,
+            n_splits=oos_cv_folds,
+            random_state=random_state,
+        )
+        oos_metrics[result_key] = oos
+        tau = oos.get("kendall_tau")
+        p_val = oos.get("kendall_p")
+        split_method = oos.get("split_method")
+        print(
+            f"  [{label}] OOS Kendall's Tau = "
+            f"{(f'{tau:.4f}' if pd.notna(tau) else 'nan')} "
+            f"(p = {(f'{p_val:.4f}' if pd.notna(p_val) else 'nan')}, {split_method})"
+        )
 
-    # Coefficient plot (using most complete financial model)
-    plot_coefficients(results, f"{output_dir}/regression_coefficients.png")
+    _run_model("Model 1", "model1", dv="ai_initiation_score", ivs=ivs_base)
+    _run_model("Model 2", "model2", dv="ai_initiation_score", ivs=ivs_fin)
+    _run_model("Model 3", "model3", dv="overall_kw_ai_ratio", ivs=ivs_fin)
 
+    model_list = [results[k] for k in ["model1", "model2", "model3"] if k in results]
+    model_labels = [
+        lab for key, lab in [("model1", "AI Init (1)"), ("model2", "AI Init (2)"), ("model3", "AI Ratio (3)")] if key in results
+    ]
+    if model_list:
+        summary = summary_col(model_list, stars=True, float_format="%0.4f", model_names=model_labels)
+        summary_path = f"{output_dir}/regression_summary.txt"
+        with open(summary_path, "w", encoding="utf-8") as f:
+            f.write(str(summary))
+            if oos_metrics:
+                f.write("\n\nOOS Kendall Tau (Group-aware CV where possible)\n")
+                for key, metrics in oos_metrics.items():
+                    f.write(
+                        f"{key}: tau={metrics['kendall_tau']}, p={metrics['kendall_p']}, "
+                        f"n={metrics['n_obs']}, split={metrics['split_method']}\n"
+                    )
+        print(f"\nSaved regression summary -> {summary_path}")
+
+    attrition_df = pd.DataFrame(attrition_records)
+    if len(attrition_df) > 0:
+        attrition_path = f"{output_dir}/regression_sample_attrition.csv"
+        attrition_df.to_csv(attrition_path, index=False)
+        print(f"Saved regression attrition summary -> {attrition_path}")
+
+    if "model2" in results:
+        plot_coefficients(results, f"{output_dir}/regression_coefficients.png")
+
+    results["oos_metrics"] = oos_metrics
+    results["attrition"] = attrition_df
     return results
 
 
-def plot_coefficients(
-    results: Dict,
-    output_path: str
-):
-    """
-    Plot regression coefficients with confidence intervals.
-    """
+def plot_coefficients(results: Dict[str, Any], output_path: str) -> None:
+    """Plot regression coefficients with confidence intervals."""
+    apply_spotify_theme()
     fig, ax = plt.subplots(figsize=(10, 6))
-    
-    # Extract coefficients from model2 (most complete)
-    model = results['model2']
-    params = model.params.drop('const')
-    conf_int = model.conf_int().drop('const')
-    
-    y_pos = range(len(params))
-    
-    ax.barh(y_pos, params.values, xerr=[
-        params.values - conf_int[0].values,
-        conf_int[1].values - params.values
-    ], capsize=5, color='steelblue', alpha=0.7)
-    
-    ax.axvline(x=0, color='black', linestyle='-', linewidth=0.5)
+    fig.patch.set_facecolor(SPOTIFY_COLORS.get("background", "#121212"))
+
+    model = results["model2"]
+    params = model.params.drop("const", errors="ignore")
+    conf_int = model.conf_int().drop("const", errors="ignore")
+    if len(params) == 0:
+        plt.close(fig)
+        return
+
+    y_pos = np.arange(len(params))
+    colors = [SPOTIFY_COLORS.get("accent", "#1DB954") if v >= 0 else SPOTIFY_COLORS.get("negative", "#FF5A5F") for v in params.values]
+
+    ax.barh(
+        y_pos,
+        params.values,
+        xerr=[params.values - conf_int[0].values, conf_int[1].values - params.values],
+        capsize=4,
+        color=colors,
+        edgecolor=SPOTIFY_COLORS.get("grid", "#2A2A2A"),
+        alpha=0.95,
+    )
+    ax.axvline(x=0, color=SPOTIFY_COLORS.get("muted", "#B3B3B3"), linestyle="-", linewidth=0.8)
     ax.set_yticks(y_pos)
     ax.set_yticklabels(params.index)
-    ax.set_xlabel('Coefficient Estimate')
-    ax.set_title('Regression Coefficients: AI Initiation Score')
-    ax.grid(True, alpha=0.3, axis='x')
-    
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
-    plt.close()
+    ax.set_xlabel("Coefficient Estimate")
+    ax.set_title("Regression Coefficients: AI Initiation Score (Model 2)")
+    style_axes(ax, grid_axis="x", grid_alpha=0.15)
+
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    fig.tight_layout()
+    save_figure(fig, output_path, dpi=180)
     print(f"Saved coefficient plot to {output_path}")
 
 
 if __name__ == "__main__":
     import argparse
-    
+
     parser = argparse.ArgumentParser(description="Regression analysis")
     parser.add_argument("--initiation", default="outputs/features/initiation_scores.parquet")
     parser.add_argument("--doc-metrics", default="outputs/features/document_metrics.parquet")
     parser.add_argument("--wrds", default="Sp500_meta_data.csv")
     parser.add_argument("--output-dir", default="outputs/figures")
-    
+    parser.add_argument("--oos-group-col", default="ticker")
+    parser.add_argument("--oos-cv-folds", type=int, default=5)
+    parser.add_argument("--no-filter-non-ai-initiation", action="store_true")
+    parser.add_argument("--seed", type=int, default=42)
+
     args = parser.parse_args()
-    
+
     run_regression_analysis(
         args.initiation,
         args.doc_metrics,
         args.wrds,
-        args.output_dir
+        args.output_dir,
+        oos_group_col=(None if str(args.oos_group_col).lower() in {"none", ""} else args.oos_group_col),
+        oos_cv_folds=args.oos_cv_folds,
+        filter_non_ai_initiation=not args.no_filter_non_ai_initiation,
+        random_state=args.seed,
     )

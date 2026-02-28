@@ -12,9 +12,32 @@ import json
 
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
 
 from sklearn.feature_extraction.text import CountVectorizer, ENGLISH_STOP_WORDS
-from sklearn.decomposition import LatentDirichletAllocation
+from sklearn.decomposition import LatentDirichletAllocation, PCA
+
+try:
+    from src.utils.visual_style import (
+        SPOTIFY_COLORS,
+        apply_spotify_theme,
+        save_figure,
+        style_axes,
+    )
+except Exception:  # pragma: no cover
+    SPOTIFY_COLORS = {
+        "background": "#121212",
+        "fg": "#F5F5F5",
+        "muted": "#B3B3B3",
+        "grid": "#2A2A2A",
+    }
+    def apply_spotify_theme():
+        return None
+    def style_axes(ax, **kwargs):
+        return ax
+    def save_figure(fig, output_path: str, dpi: int = 150):
+        fig.savefig(output_path, dpi=dpi, bbox_inches="tight")
+        plt.close(fig)
 
 
 def _parse_doc_id(doc_id: str) -> Tuple[Optional[int], Optional[int]]:
@@ -70,6 +93,82 @@ def _extract_topics(
     return topics
 
 
+def _plot_topic_cluster(
+    doc_topic: np.ndarray,
+    topics: List[Dict],
+    output_path: str,
+    title: str,
+) -> None:
+    """Plot a PCA cluster view of document-topic mixtures for a quarter."""
+    if doc_topic is None or len(doc_topic) < 3 or doc_topic.shape[1] < 2:
+        print(f"Skipping topic cluster plot (insufficient data): {title}")
+        return
+
+    try:
+        coords = PCA(n_components=2, random_state=42).fit_transform(doc_topic)
+    except Exception as e:
+        print(f"Skipping topic cluster plot ({title}): {e}")
+        return
+
+    dominant_topic = np.argmax(doc_topic, axis=1)
+    confidence = np.max(doc_topic, axis=1)
+
+    apply_spotify_theme()
+    fig, ax = plt.subplots(figsize=(10, 7))
+    fig.patch.set_facecolor(SPOTIFY_COLORS.get("background", "#121212"))
+
+    cmap = plt.cm.get_cmap("tab20", int(np.max(dominant_topic)) + 1)
+    scatter = ax.scatter(
+        coords[:, 0],
+        coords[:, 1],
+        c=dominant_topic,
+        cmap=cmap,
+        s=22 + 60 * confidence,
+        alpha=0.72,
+        linewidths=0,
+    )
+
+    for topic_id in sorted(set(int(x) for x in dominant_topic)):
+        mask = dominant_topic == topic_id
+        if mask.sum() == 0:
+            continue
+        cx = float(coords[mask, 0].mean())
+        cy = float(coords[mask, 1].mean())
+        topic_row = next((t for t in topics if int(t.get("topic_id", -1)) == topic_id), None)
+        label = f"T{topic_id}"
+        if topic_row and topic_row.get("top_terms"):
+            terms = [s.strip() for s in str(topic_row["top_terms"]).split("|")[:2]]
+            label = " / ".join([t for t in terms if t]) or label
+        ax.text(
+            cx,
+            cy,
+            label,
+            fontsize=8,
+            ha="center",
+            va="center",
+            color=SPOTIFY_COLORS.get("fg", "#F5F5F5"),
+            bbox={
+                "boxstyle": "round,pad=0.2",
+                "fc": SPOTIFY_COLORS.get("background", "#121212"),
+                "ec": SPOTIFY_COLORS.get("grid", "#2A2A2A"),
+                "alpha": 0.85,
+            },
+        )
+
+    ax.set_title(title)
+    ax.set_xlabel("PCA 1 (topic mixture space)")
+    ax.set_ylabel("PCA 2 (topic mixture space)")
+    style_axes(ax, grid_axis="both", grid_alpha=0.08)
+
+    cbar = fig.colorbar(scatter, ax=ax, pad=0.02)
+    cbar.set_label("Dominant Topic")
+    cbar.ax.tick_params(colors=SPOTIFY_COLORS.get("muted", "#B3B3B3"))
+    cbar.ax.yaxis.label.set_color(SPOTIFY_COLORS.get("fg", "#F5F5F5"))
+
+    fig.tight_layout()
+    save_figure(fig, output_path, dpi=180)
+
+
 def run_quarterly_topic_modeling(
     sentences_path: str,
     output_dir: str = "outputs/features",
@@ -81,7 +180,8 @@ def run_quarterly_topic_modeling(
     min_docs: int = 10,
     max_features: int = 5000,
     ngram_range: Tuple[int, int] = (1, 2),
-    random_state: int = 42
+    random_state: int = 42,
+    generate_cluster_plots: bool = True,
 ) -> pd.DataFrame:
     """
     Run LDA per quarter and save topic tables for manual naming.
@@ -168,6 +268,14 @@ def run_quarterly_topic_modeling(
             doc_topic_df["dominant_topic"] = doc_topic_df.drop(columns=["doc_id"]).idxmax(axis=1)
             doc_topic_path = os.path.join(topics_dir, f"doc_topics_{year}Q{quarter}.parquet")
             doc_topic_df.to_parquet(doc_topic_path, index=False)
+            if generate_cluster_plots:
+                cluster_path = os.path.join(topics_dir, f"topic_cluster_{year}Q{quarter}.png")
+                _plot_topic_cluster(
+                    doc_topic=doc_topic,
+                    topics=topics,
+                    output_path=cluster_path,
+                    title=f"Topic Clusters (PCA) — {year}Q{quarter}",
+                )
 
             print(f"Saved topics for {year}Q{quarter}: {q_topics_path}")
 
@@ -313,6 +421,7 @@ if __name__ == "__main__":
         help="After modeling, merge topic features into document metrics"
     )
     parser.add_argument("--doc-metrics", default="outputs/features/document_metrics.parquet")
+    parser.add_argument("--no-topic-cluster-plots", action="store_true")
 
     args = parser.parse_args()
 
@@ -324,6 +433,7 @@ if __name__ == "__main__":
         n_topics=args.n_topics,
         top_n_words=args.top_words,
         filter_ai=args.filter_ai,
+        generate_cluster_plots=not args.no_topic_cluster_plots,
     )
 
     if args.merge_features:

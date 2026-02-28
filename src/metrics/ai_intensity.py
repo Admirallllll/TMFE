@@ -10,6 +10,19 @@ from tqdm import tqdm
 import os
 from concurrent.futures import ProcessPoolExecutor
 
+try:
+    from src.utils.visual_style import SPOTIFY_COLORS, apply_spotify_theme, save_figure, style_axes
+except Exception:  # pragma: no cover
+    SPOTIFY_COLORS = {"background": "#121212", "blue": "#4EA1FF", "negative": "#FF5A5F", "muted": "#B3B3B3"}
+    def apply_spotify_theme():
+        return None
+    def style_axes(ax, **kwargs):
+        return ax
+    def save_figure(fig, output_path: str, dpi: int = 150):
+        fig.savefig(output_path, dpi=dpi, bbox_inches="tight")
+        import matplotlib.pyplot as plt
+        plt.close(fig)
+
 
 def _section_groupby_compute(args) -> pd.DataFrame:
     """
@@ -187,23 +200,25 @@ def plot_intensity_distributions(
     import os
 
     os.makedirs(output_dir, exist_ok=True)
+    apply_spotify_theme()
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    fig.patch.set_facecolor(SPOTIFY_COLORS.get("background", "#121212"))
 
-    sns.histplot(doc_metrics_df["speech_kw_ai_ratio"], bins=30, kde=True, ax=axes[0], color="steelblue")
+    sns.histplot(doc_metrics_df["speech_kw_ai_ratio"], bins=30, kde=True, ax=axes[0], color=SPOTIFY_COLORS.get("blue", "#4EA1FF"))
     axes[0].set_title("Speech AI Intensity Distribution (Dictionary)")
     axes[0].set_xlabel("AI Ratio")
     axes[0].set_ylabel("Count")
 
-    sns.histplot(doc_metrics_df["qa_kw_ai_ratio"], bins=30, kde=True, ax=axes[1], color="darkred")
+    style_axes(axes[0], grid_axis="y", grid_alpha=0.08)
+    sns.histplot(doc_metrics_df["qa_kw_ai_ratio"], bins=30, kde=True, ax=axes[1], color=SPOTIFY_COLORS.get("negative", "#FF5A5F"))
     axes[1].set_title("Q&A AI Intensity Distribution (Dictionary)")
     axes[1].set_xlabel("AI Ratio")
     axes[1].set_ylabel("Count")
-
-    plt.tight_layout()
+    style_axes(axes[1], grid_axis="y", grid_alpha=0.08)
+    fig.tight_layout()
     output_path = os.path.join(output_dir, "ai_intensity_distributions.png")
-    plt.savefig(output_path, dpi=150, bbox_inches="tight")
-    plt.close()
+    save_figure(fig, output_path, dpi=180)
     print(f"Saved AI intensity distribution plot to {output_path}")
 
 
@@ -218,8 +233,10 @@ def plot_intensity_scatter(
     import os
 
     os.makedirs(output_dir, exist_ok=True)
+    apply_spotify_theme()
 
     fig, ax = plt.subplots(figsize=(8, 6))
+    fig.patch.set_facecolor(SPOTIFY_COLORS.get("background", "#121212"))
     scatter = ax.scatter(
         doc_metrics_df["speech_kw_ai_ratio"],
         doc_metrics_df["qa_kw_ai_ratio"],
@@ -231,14 +248,14 @@ def plot_intensity_scatter(
     ax.set_xlabel("Speech AI Intensity (Dictionary)")
     ax.set_ylabel("Q&A AI Intensity (Dictionary)")
     ax.set_title("Speech vs Q&A AI Intensity (Color = Overall AI Ratio)")
-    ax.grid(True, alpha=0.3)
+    style_axes(ax, grid_axis="both", grid_alpha=0.08)
     cbar = plt.colorbar(scatter, ax=ax)
     cbar.set_label("Overall AI Ratio")
+    cbar.ax.tick_params(colors=SPOTIFY_COLORS.get("muted", "#B3B3B3"))
 
-    plt.tight_layout()
+    fig.tight_layout()
     output_path = os.path.join(output_dir, "ai_intensity_scatter.png")
-    plt.savefig(output_path, dpi=150, bbox_inches="tight")
-    plt.close()
+    save_figure(fig, output_path, dpi=180)
     print(f"Saved AI intensity scatter plot to {output_path}")
 
 

@@ -11,6 +11,19 @@ import os
 
 import pandas as pd
 
+try:
+    from src.utils.visual_style import SPOTIFY_COLORS, apply_spotify_theme, save_figure, style_axes
+except Exception:  # pragma: no cover
+    SPOTIFY_COLORS = {"background": "#121212", "accent": "#1DB954", "grid": "#2A2A2A", "muted": "#B3B3B3"}
+    def apply_spotify_theme():
+        return None
+    def style_axes(ax, **kwargs):
+        return ax
+    def save_figure(fig, output_path: str, dpi: int = 150):
+        fig.savefig(output_path, dpi=dpi, bbox_inches="tight")
+        import matplotlib.pyplot as plt
+        plt.close(fig)
+
 
 def _parse_doc_id(doc_id: str) -> Tuple[Optional[str], Optional[int], Optional[int]]:
     parts = str(doc_id).rsplit("_", 1)
@@ -108,6 +121,7 @@ def _plot_top(
 ) -> None:
     import matplotlib.pyplot as plt
 
+    apply_spotify_theme()
     df = year_df.dropna(subset=[metric_col]).copy()
     if len(df) == 0:
         print(f"No data for {metric_col} in {year}. Skipping.")
@@ -116,16 +130,16 @@ def _plot_top(
     top = df.nlargest(top_n, metric_col).sort_values(metric_col, ascending=True)
 
     fig, ax = plt.subplots(figsize=(8, 6))
+    fig.patch.set_facecolor(SPOTIFY_COLORS.get("background", "#121212"))
 
-    ax.barh(top["ticker"], top[metric_col], color="seagreen", alpha=0.8)
+    ax.barh(top["ticker"], top[metric_col], color=SPOTIFY_COLORS.get("accent", "#1DB954"), alpha=0.9)
     ax.set_title(f"Top {top_n}")
     ax.set_xlabel("AI Ratio")
-    ax.grid(True, axis="x", alpha=0.3)
+    style_axes(ax, grid_axis="x", grid_alpha=0.08)
     fig.suptitle(title, fontsize=14)
 
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=150, bbox_inches="tight")
-    plt.close()
+    fig.tight_layout()
+    save_figure(fig, output_path, dpi=180)
     print(f"Saved ranking plot to {output_path}")
 
 

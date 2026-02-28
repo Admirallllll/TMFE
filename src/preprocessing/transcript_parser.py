@@ -89,8 +89,18 @@ class TranscriptParser:
         r"q\s*&\s*a\s+portion",
         r"open.*(?:for|to).*questions",
         r"take.*questions",
+        r"we(?:'ll|\s+will)\s+now\s+take\s+(?:your|our|any)?\s*questions?",
+        r"we(?:'re|\s+are)\s+ready\s+for\s+questions?",
         r"first question",
         r"over to.*(?:operator|questions)",
+    ]
+
+    OPERATOR_SPEAKER_PATTERNS = [
+        r"\boperator\b",
+        r"\bconference\s+operator\b",
+        r"\bmoderator\b",
+        r"\bcoordinator\b",
+        r"\bquestion[-\s]?and[-\s]?answer\s+operator\b",
     ]
 
     # Analyst firm patterns — used with re.search on operator introduction text
@@ -160,6 +170,13 @@ class TranscriptParser:
             r"(.+?)(?:\.\s|\.?$|\.\s*(?:Please|Your|Go|One))",
             re.IGNORECASE
         ),
+        re.compile(
+            r"(?:next\s+question|first\s+question|next\s+caller|our\s+(?:next|first|final|last)\s+question)"
+            r".*?(?:comes?\s+from|from|is)\s+"
+            r"([A-Z][a-zA-Z\.\-']+(?:\s+[A-Z][a-zA-Z\.\-']+){0,3})"
+            r"(?:\.\s|\.?$|\s*(?:please|go\s+ahead))",
+            re.IGNORECASE,
+        ),
     ]
 
     def __init__(self):
@@ -172,6 +189,9 @@ class TranscriptParser:
         )
         self._mgmt_title_re = re.compile(
             "|".join(self.MANAGEMENT_TITLE_PATTERNS), re.IGNORECASE
+        )
+        self._operator_speaker_re = re.compile(
+            "|".join(self.OPERATOR_SPEAKER_PATTERNS), re.IGNORECASE
         )
 
     def parse_structured_content(self, content: str) -> List[Dict]:
@@ -229,6 +249,19 @@ class TranscriptParser:
         """Lowercase, strip, collapse whitespace."""
         return re.sub(r"\s+", " ", name.strip()).lower()
 
+    def _is_operator_speaker(self, speaker: str) -> bool:
+        return bool(self._operator_speaker_re.search(speaker or ""))
+
+    @staticmethod
+    def _looks_like_generic_analyst_label(speaker_lower: str) -> bool:
+        generic_analyst = [
+            "unidentified analyst",
+            "analyst",
+            "questioner",
+            "caller",
+        ]
+        return any(term in speaker_lower for term in generic_analyst)
+
     # ------------------------------------------------------------------
     # Role classification — single-turn (used as building block)
     # ------------------------------------------------------------------
@@ -245,15 +278,20 @@ class TranscriptParser:
         """
         speaker_lower = speaker.lower()
 
-        if 'operator' in speaker_lower:
+        if self._is_operator_speaker(speaker_lower):
             return 'operator'
 
-        # Management: word-boundary title match
-        if self._mgmt_title_re.search(speaker_lower):
-            return 'management'
-
         # Analyst: firm name / role in speaker field (regex, not `in`)
-        if self._analyst_firm_re.search(speaker_lower):
+        has_analyst_signal = bool(self._analyst_firm_re.search(speaker_lower))
+        has_mgmt_signal = bool(self._mgmt_title_re.search(speaker_lower))
+
+        if has_analyst_signal and (not has_mgmt_signal or self._looks_like_generic_analyst_label(speaker_lower)):
+            return 'analyst'
+        if has_mgmt_signal:
+            return 'management'
+        if has_analyst_signal:
+            return 'analyst'
+        if self._looks_like_generic_analyst_label(speaker_lower):
             return 'analyst'
 
         return 'unknown'
@@ -297,7 +335,7 @@ class TranscriptParser:
             sp_norm = self._normalise_name(speaker)
 
             # 1. Operator
-            if 'operator' in sp_norm:
+            if self._is_operator_speaker(sp_norm):
                 roles[i] = 'operator'
                 # Extract analyst name from introduction
                 announced = self._extract_analyst_from_operator(text)
@@ -362,6 +400,19 @@ class TranscriptParser:
                 speaker_role_cache[sp_norm] = 'management'
                 continue
 
+            # Question-like turn by unknown speaker is typically analyst.
+            text = qa_turns[i].get('text', '')
+            if self.is_question(text):
+                roles[i] = 'analyst'
+                speaker_role_cache[sp_norm] = 'analyst'
+                continue
+
+            # Non-question follow-up after management usually remains management.
+            if prev_role in ('management', 'unknown'):
+                roles[i] = 'management'
+                speaker_role_cache[sp_norm] = 'management'
+                continue
+
         # --- Pass 3: propagate remaining unknowns -------------------------
         for i in range(n):
             if roles[i] is not None:
@@ -371,7 +422,11 @@ class TranscriptParser:
             if sp_norm in speaker_role_cache:
                 roles[i] = speaker_role_cache[sp_norm]
             else:
-                roles[i] = 'unknown'
+                text = qa_turns[i].get('text', '')
+                if self.is_question(text):
+                    roles[i] = 'analyst'
+                else:
+                    roles[i] = 'management'
 
         return [(roles[i], self._normalise_name(qa_turns[i].get('speaker', '')))
                 for i in range(n)]
@@ -398,6 +453,10 @@ class TranscriptParser:
         ),
         re.compile(
             r"we(?:'ll|\s+will)\s+take\s+(?:our\s+)?(?:first|next)\s+question",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"we(?:'ll|\s+will)\s+now\s+take\s+(?:your|our|any)?\s*questions?",
             re.IGNORECASE,
         ),
     ]
@@ -479,7 +538,7 @@ class TranscriptParser:
         for i, turn in enumerate(turns):
             speaker = turn.get('speaker', '')
             text = turn.get('text', '')
-            is_operator = 'operator' in speaker.lower()
+            is_operator = self._is_operator_speaker(speaker.lower())
 
             if is_operator:
                 # Skip operator opening greetings — these often contain
@@ -509,7 +568,7 @@ class TranscriptParser:
         for i, turn in enumerate(turns):
             speaker = turn.get('speaker', '')
             text = turn.get('text', '')
-            is_operator = 'operator' in speaker.lower()
+            is_operator = self._is_operator_speaker(speaker.lower())
 
             if not is_operator:
                 role = self.classify_role(speaker, text)
@@ -534,7 +593,7 @@ class TranscriptParser:
         for i, turn in enumerate(turns):
             speaker = turn.get('speaker', '')
             text = turn.get('text', '')
-            is_operator = 'operator' in speaker.lower()
+            is_operator = self._is_operator_speaker(speaker.lower())
 
             if not is_operator:
                 role = self.classify_role(speaker, text)
@@ -558,7 +617,7 @@ class TranscriptParser:
         for i, turn in enumerate(turns):
             speaker = turn.get('speaker', '')
             text = turn.get('text', '')
-            is_operator = 'operator' in speaker.lower()
+            is_operator = self._is_operator_speaker(speaker.lower())
 
             if not is_operator:
                 role = self.classify_role(speaker, text)
@@ -593,7 +652,7 @@ class TranscriptParser:
         seen_non_operator = False
         for i, turn in enumerate(turns):
             speaker = turn.get('speaker', '')
-            if 'operator' not in speaker.lower():
+            if not self._is_operator_speaker(speaker.lower()):
                 seen_non_operator = True
                 continue
             if not seen_non_operator:
