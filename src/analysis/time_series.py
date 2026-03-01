@@ -108,14 +108,22 @@ def compute_aggregate_trends(
     Returns:
         DataFrame with time-aggregated metrics
     """
+    # Create indicator for whether a document mentions AI at all
+    df = df.copy()
+    df['mentions_ai'] = (df['overall_kw_ai_ratio'] > 0).astype(int)
+
     agg_df = df.groupby(group_col).agg({
         'speech_kw_ai_ratio': ['mean', 'std', 'count'],
         'qa_kw_ai_ratio': ['mean', 'std'],
-        'overall_kw_ai_ratio': 'mean'
+        'overall_kw_ai_ratio': 'mean',
+        'mentions_ai': 'mean'
     }).reset_index()
     
     # Flatten column names
     agg_df.columns = ['_'.join(col).strip('_') for col in agg_df.columns]
+    
+    # Rename mentions_ai_mean to something more descriptive
+    agg_df = agg_df.rename(columns={'mentions_ai_mean': 'prop_docs_mentioning_ai'})
     
     return agg_df
 
@@ -126,47 +134,73 @@ def plot_ai_trends(
     title: str = "AI Narrative Intensity Over Time"
 ):
     """
-    Plot Speech vs Q&A AI intensity trends.
+    Plot Speech vs Q&A AI intensity trends matching the reference style.
     
     Args:
         trend_df: Aggregated trend data
         output_path: Path to save figure
         title: Plot title
     """
-    apply_spotify_theme()
-    fig, axes = plt.subplots(1, 1, figsize=(14, 6))
-    fig.patch.set_facecolor(SPOTIFY_COLORS.get("background", "#121212"))
+    # Use standard white background style
+    plt.style.use('default')
+    fig, ax1 = plt.subplots(figsize=(14, 6))
     
     # Sort by time
     trend_df = trend_df.sort_values('year_quarter')
     x = range(len(trend_df))
     
-    # Plot: Dictionary-based AI intensity
-    ax1 = axes
-    ax1.plot(x, trend_df['speech_kw_ai_ratio_mean'], '-o', label='Speech AI Intensity', linewidth=2, color=SPOTIFY_COLORS.get("blue", "#4EA1FF"))
-    ax1.plot(x, trend_df['qa_kw_ai_ratio_mean'], '-s', label='Q&A AI Intensity', linewidth=2, color=SPOTIFY_COLORS.get("negative", "#FF5A5F"))
+    # Plot 1: Speech AI Intensity (Blue with circles)
+    line1, = ax1.plot(x, trend_df['speech_kw_ai_ratio_mean'], 
+                     color='blue', marker='o', linestyle='-', 
+                     linewidth=2, label='Speech AI Intensity')
     
-    # Add ChatGPT release marker (Nov 2022 = 2022Q4)
+    # Plot 2: Q&A AI Intensity (Red with squares)
+    line2, = ax1.plot(x, trend_df['qa_kw_ai_ratio_mean'], 
+                     color='red', marker='s', linestyle='-', 
+                     linewidth=2, label='Q&A AI Intensity')
+    
+    # Plot 3: Proportion of documents mentioning AI (Secondary Y-axis, dashed green)
+    # Keeping this as it was requested as a supplemental metric
+    ax2 = ax1.twinx()
+    line3, = ax2.plot(x, trend_df['prop_docs_mentioning_ai'], 
+                     color='green', marker='d', linestyle='--', 
+                     linewidth=1, alpha=0.5, label='Proportion of AI Calls')
+    
+    # Add ChatGPT release vertical line (Green dashed)
     chatgpt_idx = None
     for i, yq in enumerate(trend_df['year_quarter']):
         if '2022Q4' in str(yq):
             chatgpt_idx = i
             break
     
+    chatgpt_line = None
     if chatgpt_idx is not None:
-        ax1.axvline(x=chatgpt_idx, color=SPOTIFY_COLORS.get("accent", "#1DB954"), linestyle='--', alpha=0.8, label='ChatGPT Release (Nov 2022)')
+        chatgpt_line = ax1.axvline(x=chatgpt_idx, color='green', linestyle='--', 
+                                  linewidth=1, label='ChatGPT Release (Nov 2022)')
     
+    # Grid, Labels and Title
+    ax1.grid(True, linestyle='-', alpha=0.2)
     ax1.set_xlabel('Quarter')
     ax1.set_ylabel('AI Intensity (% of sentences)')
+    ax2.set_ylabel('Share of Documents Mentioning AI')
     ax1.set_title(f'{title} (Dictionary)')
-    ax1.set_xticks(x[::2])
-    ax1.set_xticklabels(trend_df['year_quarter'].iloc[::2], rotation=45, ha='right')
-    ax1.legend()
-    style_axes(ax1, grid_axis="y", grid_alpha=0.08)
-    style_legend(ax1)
+    
+    # X-axis ticks
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(trend_df['year_quarter'], rotation=45, ha='right')
+    
+    # Legend - matching the reference image style (top left)
+    # We include Speech, Q&A, and ChatGPT Release in the main legend
+    legend_elements = [line1, line2]
+    if chatgpt_line:
+        legend_elements.append(chatgpt_line)
+    legend_elements.append(line3) # Also include the new metric
+    
+    ax1.legend(handles=legend_elements, loc='upper left', frameon=True)
     
     fig.tight_layout()
-    save_figure(fig, output_path, dpi=180)
+    plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
     print(f"Saved trend plot to {output_path}")
 
 
